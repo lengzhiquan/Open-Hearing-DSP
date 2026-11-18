@@ -1,0 +1,40 @@
+MEASURE graphic +6 dB @ 1 kHz L=6.0000 dB R=-6.0000 dB 40Hz=0.0052 dB
+MEASURE processor graphic sine gain 6.000 dB
+MEASURE single compressor settled -16.500 dBFS (expect -16.5)
+MEASURE crossover bands=4 impulse_max_abs_err=8.23289e-07
+MEASURE crossover bands=4 f=80 compensated=-0.003 dB raw=-0.251 dB
+MEASURE crossover bands=4 f=250 compensated=-0.027 dB raw=-1.820 dB
+MEASURE crossover bands=4 f=1000 compensated=0.007 dB raw=-0.124 dB
+MEASURE crossover bands=4 f=5000 compensated=-0.002 dB raw=-0.002 dB
+MEASURE crossover bands=4 f=10000 compensated=0.001 dB raw=0.001 dB
+MEASURE crossover bands=4 group_delay_at_1k_samples=27.96 (IIR, not a fixed latency)
+MEASURE crossover bands=5 impulse_max_abs_err=8.41916e-07
+MEASURE crossover bands=5 f=80 compensated=-0.029 dB raw=-0.251 dB
+MEASURE crossover bands=5 f=250 compensated=0.016 dB raw=-1.829 dB
+MEASURE crossover bands=5 f=1000 compensated=-0.010 dB raw=-2.732 dB
+MEASURE crossover bands=5 f=5000 compensated=0.003 dB raw=0.000 dB
+MEASURE crossover bands=5 f=10000 compensated=0.002 dB raw=0.002 dB
+MEASURE crossover bands=5 group_delay_at_1k_samples=44.25 (IIR, not a fixed latency)
+MEASURE crossover bands=6 impulse_max_abs_err=8.41916e-07
+MEASURE crossover bands=6 f=80 compensated=-0.040 dB raw=-0.251 dB
+MEASURE crossover bands=6 f=250 compensated=0.033 dB raw=-1.829 dB
+MEASURE crossover bands=6 f=1000 compensated=-0.012 dB raw=-3.069 dB
+MEASURE crossover bands=6 f=5000 compensated=-0.000 dB raw=-0.240 dB
+MEASURE crossover bands=6 f=10000 compensated=-0.001 dB raw=-0.004 dB
+MEASURE crossover bands=6 group_delay_at_1k_samples=48.45 (IIR, not a fixed latency)
+MEASURE crossover bands=7 impulse_max_abs_err=8.45641e-07
+MEASURE crossover bands=7 f=80 compensated=-0.045 dB raw=-0.251 dB
+MEASURE crossover bands=7 f=250 compensated=0.040 dB raw=-1.829 dB
+MEASURE crossover bands=7 f=1000 compensated=-0.005 dB raw=-3.069 dB
+MEASURE crossover bands=7 f=5000 compensated=0.002 dB raw=-3.039 dB
+MEASURE crossover bands=7 f=10000 compensated=0.001 dB raw=-0.229 dB
+MEASURE crossover bands=7 group_delay_at_1k_samples=50.45 (IIR, not a fixed latency)
+MEASURE crossover bands=8 impulse_max_abs_err=8.41916e-07
+MEASURE crossover bands=8 f=80 compensated=-0.048 dB raw=-0.251 dB
+MEASURE crossover bands=8 f=250 compensated=0.043 dB raw=-1.829 dB
+MEASURE crossover bands=8 f=1000 compensated=0.000 dB raw=-3.069 dB
+MEASURE crossover bands=8 f=5000 compensated=0.002 dB raw=-3.726 dB
+MEASURE crossover bands=8 f=10000 compensated=-0.001 dB raw=-4.396 dB
+MEASURE crossover bands=8 group_delay_at_1k_samples=51.78 (IIR, not a fixed latency)
+MEASURE multiband dynamic coloration at 1 kHz -2.097 dB vs bypassed recombination
+ALL TESTS PASSED

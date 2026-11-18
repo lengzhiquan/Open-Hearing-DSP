@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Open Hearing DSP</string>
+    <string name="notif_channel">麦克风监听</string>
+    <string name="notif_title">开放听力 DSP 正在采集麦克风</string>
+    <string name="notif_text">实验监听进行中。这不是助听器。点按可返回应用。</string>
+    <string name="notif_stop">停止</string>
+</resources>
