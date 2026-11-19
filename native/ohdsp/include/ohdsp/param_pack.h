@@ -4,8 +4,8 @@
 
 namespace ohdsp {
 
-constexpr int kPackFloats = 135;
-constexpr int kPackInts = 48;
+constexpr int kPackFloats = 166;
+constexpr int kPackInts = 66;
 
 inline bool decodeParams(const float* f, int nf, const int* ii, int ni, Params& out, std::string* err) {
   if (f == nullptr || ii == nullptr || nf < kPackFloats || ni < kPackInts) {
@@ -61,6 +61,39 @@ inline bool decodeParams(const float* f, int nf, const int* ii, int ni, Params& 
     p.peq[i][0].enabled = ii[24 + i];
     p.peq[i][1].type = ii[32 + i];
     p.peq[i][1].enabled = ii[40 + i];
+  }
+  for (int i = 0; i < kGraphicBands; ++i) {
+    p.micCorrDb[i][0] = f[135 + i];
+    p.micCorrDb[i][1] = f[145 + i];
+  }
+  for (int i = 0; i < kMaxDynamicsBands; ++i) p.noiseFloorDb[i] = f[155 + i];
+  p.measurementCeilingDb = f[163];
+  p.feedbackMarginDb = f[164];
+  p.noiseMarginDb = f[165];
+  p.inputMode = ii[48];
+  p.channelSwap = ii[49];
+  p.micCalMode = ii[50];
+  p.noiseFloorControl = ii[51];
+  p.spectralNr = ii[52];
+  p.howlingDetect = ii[53];
+  p.measurementMode = ii[54];
+  p.feedbackMarginValid = ii[55];
+  p.topChannel = ii[56];
+  p.single.detectRms = ii[57];
+  for (int i = 0; i < kMaxDynamicsBands; ++i) p.multi[i].detectRms = ii[58 + i];
+  // Zero-filled legacy buffers did not know these fields. Map the empty values
+  // onto the same defaults as Params{} so an all-zero tail still validates.
+  if (!(p.measurementCeilingDb < -0.5f)) p.measurementCeilingDb = -18.f;
+  if (!(p.noiseMarginDb >= 1.f)) p.noiseMarginDb = 8.f;
+  if (p.feedbackMarginValid == 0 && p.feedbackMarginDb == 0.f) p.feedbackMarginDb = 24.f;
+  if (p.noiseFloorControl == 0) {
+    bool allZero = true;
+    for (int i = 0; i < kMaxDynamicsBands; ++i) {
+      if (p.noiseFloorDb[i] != 0.f) allZero = false;
+    }
+    if (allZero) {
+      for (int i = 0; i < kMaxDynamicsBands; ++i) p.noiseFloorDb[i] = -80.f;
+    }
   }
   if (!validateParams(p, err)) return false;
   out = p;

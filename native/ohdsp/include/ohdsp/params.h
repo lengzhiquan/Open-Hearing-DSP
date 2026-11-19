@@ -27,6 +27,8 @@ struct CompBand {
   float kneeDb = 6.f;
   float makeupDb = 0.f;
   int bypass = 1;
+  // 0: V1 linked peak envelope. 1: band RMS from the analysis crossover, used by fitted WDRC.
+  int detectRms = 0;
 };
 
 struct Params {
@@ -48,6 +50,21 @@ struct Params {
   int multiBandCount = 4;
   float crossoverHz[kMaxDynamicsBands - 1] = {200.f, 500.f, 1000.f, 2000.f, 4000.f, 8000.f, 12000.f};
   CompBand multi[kMaxDynamicsBands]{};
+  // V2.1. Defaults keep the V1 signal path: no mic correction, no noise cap, no spectral NR.
+  int inputMode = 0;  // 0 stereo-dual-mic, 1 dual-mic-mono-sum, 2 top-mic-mono
+  int channelSwap = 0;
+  int micCalMode = 0;  // 0 uncalibrated (correction forced off), 1 subjective, 2 reference mic
+  int noiseFloorControl = 0;
+  int spectralNr = 0;
+  int howlingDetect = 0;
+  int measurementMode = 0;
+  int feedbackMarginValid = 0;
+  int topChannel = -1;  // -1 unknown, 0 left, 1 right. Unknown top-mic on a stereo stream mutes.
+  float measurementCeilingDb = -18.f;
+  float feedbackMarginDb = 24.f;
+  float noiseMarginDb = 8.f;
+  float micCorrDb[kGraphicBands][2] = {};
+  float noiseFloorDb[kMaxDynamicsBands] = {-80.f, -80.f, -80.f, -80.f, -80.f, -80.f, -80.f, -80.f};
 };
 
 inline bool finiteInRange(float v, float lo, float hi) {
@@ -99,6 +116,7 @@ inline bool validateParams(const Params& p, std::string* err) {
     if (!finiteInRange(c.kneeDb, 0.f, 20.f)) return bad("压缩膝超出 0..20 dB");
     if (!finiteInRange(c.makeupDb, -12.f, 24.f)) return bad("补偿增益超出 -12..+24 dB");
     if (c.bypass != 0 && c.bypass != 1) return bad("压缩旁路标志无效");
+    if (c.detectRms != 0 && c.detectRms != 1) return bad("压缩检测方式无效");
     return true;
   };
   if (!checkComp(p.single)) return false;
@@ -112,6 +130,26 @@ inline bool validateParams(const Params& p, std::string* err) {
     if (!finiteInRange(f, 40.f, 16000.f)) return bad("分频点超出 40..16000 Hz 或不是有限值");
     if (i > 0 && !(f >= prev * 1.2f)) return bad("相邻分频点至少间隔 1.2 倍");
     prev = f;
+  }
+  if (p.inputMode < 0 || p.inputMode > 2) return bad("输入模式无效");
+  if (p.channelSwap != 0 && p.channelSwap != 1) return bad("左右互换标志无效");
+  if (p.micCalMode < 0 || p.micCalMode > 2) return bad("麦克风校准档位无效");
+  if ((p.noiseFloorControl | p.spectralNr | p.howlingDetect | p.measurementMode | p.feedbackMarginValid) & ~1) {
+    return bad("V2 开关标志无效");
+  }
+  if (p.topChannel < -1 || p.topChannel > 1) return bad("顶部声道标记无效");
+  if (!finiteInRange(p.measurementCeilingDb, -40.f, -12.f)) {
+    return bad("测量输出上限必须在 -40..-12 dBFS，严于监听安全限幅");
+  }
+  if (!finiteInRange(p.feedbackMarginDb, 0.f, 40.f)) return bad("反馈余量超出 0..40 dB");
+  if (!finiteInRange(p.noiseMarginDb, 1.f, 24.f)) return bad("噪声底余量超出 1..24 dB");
+  for (int band = 0; band < kGraphicBands; ++band) {
+    for (int ch = 0; ch < 2; ++ch) {
+      if (!finiteInRange(p.micCorrDb[band][ch], -12.f, 12.f)) return bad("麦克风修正超出 ±12 dB");
+    }
+  }
+  for (int i = 0; i < kMaxDynamicsBands; ++i) {
+    if (!finiteInRange(p.noiseFloorDb[i], -120.f, 0.f)) return bad("噪声底超出 -120..0 dBFS");
   }
   return true;
 }

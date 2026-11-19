@@ -20,6 +20,7 @@ data class CompBand(
     val kneeDb: Float = 6f,
     val makeupDb: Float = 0f,
     val bypass: Boolean = true,
+    val detectRms: Boolean = false,
 )
 
 @Serializable
@@ -41,17 +42,33 @@ data class DspConfig(
     val multiBandCount: Int = 4,
     val crossoverHz: List<Float> = listOf(200f, 500f, 1000f, 2000f, 4000f, 8000f, 12000f),
     val multi: List<CompBand> = List(8) { CompBand() },
-    val userLimiterBypass: Boolean = true,
-    val userLimiterCeilingDb: Float = -3f,
-    val userLimiterReleaseMs: Float = 80f,
+  val userLimiterBypass: Boolean = true,
+  val userLimiterCeilingDb: Float = -3f,
+  val userLimiterReleaseMs: Float = 80f,
+  val inputMode: Int = 0,
+  val channelSwap: Boolean = false,
+  val micCalMode: Int = 0,
+  val noiseFloorControl: Boolean = false,
+  val spectralNr: Boolean = false,
+  val howlingDetect: Boolean = false,
+  val measurementMode: Boolean = false,
+  val feedbackMarginValid: Boolean = false,
+  val topChannel: Int = -1,
+  val measurementCeilingDb: Float = -18f,
+  val feedbackMarginDb: Float = 24f,
+  val noiseMarginDb: Float = 8f,
+  val micCorrL: List<Float> = List(10) { 0f },
+  val micCorrR: List<Float> = List(10) { 0f },
+  val noiseFloorDb: List<Float> = List(8) { -80f },
+  val detectRms: Boolean = false,
 ) {
   fun gains() = GainSetting(inputDb, outputDb, leftDb, rightDb)
 
   fun withGains(g: GainSetting) = copy(inputDb = g.inputDb, outputDb = g.outputDb, leftDb = g.leftDb, rightDb = g.rightDb)
 }
 
-const val PACK_FLOATS = 135
-const val PACK_INTS = 48
+const val PACK_FLOATS = 166
+const val PACK_INTS = 66
 val GRAPHIC_HZ = floatArrayOf(31f, 62f, 125f, 250f, 500f, 1000f, 2000f, 4000f, 8000f, 16000f)
 
 fun DspConfig.pack(): Pair<FloatArray, IntArray> {
@@ -98,7 +115,26 @@ fun DspConfig.pack(): Pair<FloatArray, IntArray> {
     ii[32 + band] = r.type
     ii[40 + band] = if (r.enabled) 1 else 0
     ii[8 + band] = if (multi.getOrElse(band) { CompBand() }.bypass) 1 else 0
+    ii[58 + band] = if (multi.getOrElse(band) { CompBand() }.detectRms || detectRms) 1 else 0
   }
+  for (i in 0 until 10) {
+    f[135 + i] = micCorrL.getOrElse(i) { 0f }
+    f[145 + i] = micCorrR.getOrElse(i) { 0f }
+  }
+  for (i in 0 until 8) f[155 + i] = noiseFloorDb.getOrElse(i) { -80f }
+  f[163] = measurementCeilingDb
+  f[164] = feedbackMarginDb
+  f[165] = noiseMarginDb
+  ii[48] = inputMode
+  ii[49] = if (channelSwap) 1 else 0
+  ii[50] = micCalMode
+  ii[51] = if (noiseFloorControl) 1 else 0
+  ii[52] = if (spectralNr) 1 else 0
+  ii[53] = if (howlingDetect) 1 else 0
+  ii[54] = if (measurementMode) 1 else 0
+  ii[55] = if (feedbackMarginValid) 1 else 0
+  ii[56] = topChannel
+  ii[57] = if (single.detectRms || detectRms) 1 else 0
   ii[0] = if (processingBypass) 1 else 0
   ii[1] = if (eqBypass) 1 else 0
   ii[2] = if (graphicBypass) 1 else 0
@@ -132,6 +168,21 @@ fun validateConfig(p: DspConfig): String? {
   }
   (listOf(p.single) + p.multi).forEach { c ->
     validateComp(c)?.let { return it }
+  }
+  if (p.inputMode !in 0..2) return "输入模式无效"
+  if (p.micCalMode !in 0..2) return "麦克风校准档位无效"
+  if (p.topChannel !in -1..1) return "顶部声道标记无效"
+  if (!p.measurementCeilingDb.isFinite() || p.measurementCeilingDb < -40f || p.measurementCeilingDb > -12f) {
+    return "测量输出上限必须在 -40..-12 dBFS"
+  }
+  if (p.measurementCeilingDb >= -1f) return "测量输出上限必须严于监听安全限幅"
+  if (p.micCorrL.size < 10 || p.micCorrR.size < 10) return "麦克风修正段数不对"
+  for (v in p.micCorrL + p.micCorrR) {
+    if (!v.isFinite() || v < -12f || v > 12f) return "麦克风修正超出 ±12 dB"
+  }
+  if (p.noiseFloorDb.size < 8) return "噪声底段数不对"
+  for (v in p.noiseFloorDb) {
+    if (!v.isFinite() || v < -120f || v > 0f) return "噪声底超出 -120..0 dBFS"
   }
   if (p.crossoverHz.size < p.multiBandCount - 1) return "分频点不够"
   var prev = 0f

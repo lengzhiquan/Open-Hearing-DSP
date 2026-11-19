@@ -166,7 +166,11 @@ bool Engine::openOne(oboe::Direction dir, const Spec& spec, int deviceId, oboe::
   b.setUsage(oboe::Usage::Media);
   b.setContentType(oboe::ContentType::Music);
   if (spec.sampleRate > 0) b.setSampleRate(spec.sampleRate);
-  if (spec.channels > 0) b.setChannelCount(spec.channels);
+  if (dir == oboe::Direction::Input && requestedInChannels_ > 0) {
+    b.setChannelCount(requestedInChannels_);
+  } else if (spec.channels > 0) {
+    b.setChannelCount(spec.channels);
+  }
   if (deviceId > 0) b.setDeviceId(deviceId);
   if (dir == oboe::Direction::Input) {
     b.setInputPreset(preset);
@@ -207,7 +211,8 @@ bool Engine::openOne(oboe::Direction dir, const Spec& spec, int deviceId, oboe::
   return result == oboe::Result::OK && out;
 }
 
-std::string Engine::start(int inputDeviceId, int outputDeviceId, bool preferUnprocessed, bool trySession) {
+std::string Engine::start(int inputDeviceId, int outputDeviceId, bool preferUnprocessed, bool trySession,
+                          int requestedInputChannels) {
   std::lock_guard<std::mutex> lock(control_);
   if (running_.load(std::memory_order_acquire)) stop();
   log_.clear();
@@ -222,6 +227,12 @@ std::string Engine::start(int inputDeviceId, int outputDeviceId, bool preferUnpr
   inputReadErrors_.store(0, std::memory_order_relaxed);
   primed_ = 0;
   primeCallbacks_ = 0;
+  requestedInId_ = inputDeviceId;
+  requestedInChannels_ = requestedInputChannels;
+  inputMismatch_ = 0;
+  appendLog(requestedInputChannels >= 2
+                ? "输入请求固定为内置麦克风，声道数 2。setDeviceId 只是请求，打开后会核对实际设备。"
+                : "输入请求固定为内置麦克风，声道数 1。打开后会核对实际设备，不会把单声道叫做立体声双麦。");
 
   auto self = shared_from_this();
   dataCb_ = std::make_shared<DataCallback>(self);
@@ -336,6 +347,22 @@ std::string Engine::start(int inputDeviceId, int outputDeviceId, bool preferUnpr
   if (inChannels_ == 1) {
     appendLog("输入为单声道。送到左右输出的是同一信号的复制，不包含双耳空间信息。");
   }
+  const bool idBad = inputDeviceId > 0 && inDevice_ != inputDeviceId;
+  const bool chBad = requestedInputChannels > 0 && inChannels_ != requestedInputChannels;
+  inputMismatch_ = (idBad || chBad) ? 1 : 0;
+  if (inputMismatch_) {
+    appendLog("警告：实际打开的输入与请求不一致。请求 id " + std::to_string(inputDeviceId) + " 声道 " +
+              std::to_string(requestedInputChannels) + "，实际 id " + std::to_string(inDevice_) + " 声道 " +
+              std::to_string(inChannels_) + "。没有把请求当成已经固定。将关闭并静音，不会自动改用其他麦克风。");
+    running_.store(0, std::memory_order_release);
+    input_->close();
+    output_->close();
+    input_.reset();
+    output_.reset();
+    return "MISMATCH\n" + log_;
+  }
+  appendLog("已核对输入：请求 id " + std::to_string(inputDeviceId) + " 实际 id " + std::to_string(inDevice_) +
+            "，声道 " + std::to_string(inChannels_) + "。");
   if (outChannels_ == 1) {
     appendLog("输出为单声道。没有独立的右声道。");
   }
@@ -386,6 +413,12 @@ std::string Engine::start(int inputDeviceId, int outputDeviceId, bool preferUnpr
   __android_log_print(ANDROID_LOG_INFO, kLogTag, "streams started in=%d out=%d", inDevice_, outDevice_);
   return "OK\n" + log_;
 }
+
+void Engine::setStimulus(int enabled, float freqHz, float amplitude, int ear) {
+  processor_.setStimulus(enabled, freqHz, amplitude, ear);
+}
+
+void Engine::fillBands(float* inDb, float* outDb) { processor_.copyBandDb(inDb, outDb); }
 
 void Engine::stop() {
   // Caller holds control_ or we take it. start() calls stop() while holding the lock.
@@ -744,6 +777,13 @@ void Engine::fillDiag(int32_t* ints, int nInt, float* floats, int nFloat, int64_
   zi(54, lastError_.load(std::memory_order_relaxed));
   zi(55, meters.pulseRejected);
   zi(56, clearedDeviceId_.load(std::memory_order_acquire));
+  zi(57, requestedInChannels_);
+  zi(58, requestedInId_);
+  zi(59, inputMismatch_ ? 0 : 1);
+  zi(60, (requestedInChannels_ > 0 && inChannels_ == requestedInChannels_) ? 1 : 0);
+  zi(61, meters.howlingEvents);
+  zi(62, meters.spectralActive);
+  zi(63, 0);
 
   zf(0, meters.inPeakDbL);
   zf(1, meters.inPeakDbR);
@@ -766,6 +806,7 @@ void Engine::fillDiag(int32_t* ints, int nInt, float* floats, int nFloat, int64_
   zf(18, static_cast<float>(budgetUs));
   zf(19, inRate_ > 0 ? 1000.f * static_cast<float>(inBuf_) / static_cast<float>(inRate_) : -1.f);
   zf(20, meters.compGrDb);
+  zf(21, meters.howlingReductionDb);
 
   zl(0, inTsOk);
   zl(1, inFrame);

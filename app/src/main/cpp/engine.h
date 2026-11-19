@@ -21,7 +21,10 @@ constexpr int kDiagLongs = 8;
 
 class Engine : public std::enable_shared_from_this<Engine> {
  public:
-  std::string start(int inputDeviceId, int outputDeviceId, bool preferUnprocessed, bool trySession);
+  std::string start(int inputDeviceId, int outputDeviceId, bool preferUnprocessed, bool trySession,
+                   int requestedInputChannels);
+  void setStimulus(int enabled, float freqHz, float amplitude, int ear);
+  void fillBands(float* inDb, float* outDb);
   void stop();
 
   bool setGains(float inDb, float outDb, float lDb, float rDb, std::string* err);
@@ -92,6 +95,9 @@ class Engine : public std::enable_shared_from_this<Engine> {
   std::atomic<int> inputReadErrors_{0};
 
   int inDevice_ = 0;
+  int requestedInChannels_ = 0;
+  int requestedInId_ = 0;
+  int inputMismatch_ = 0;
   int outDevice_ = 0;
   int inChannels_ = 0;
   int outChannels_ = 0;
