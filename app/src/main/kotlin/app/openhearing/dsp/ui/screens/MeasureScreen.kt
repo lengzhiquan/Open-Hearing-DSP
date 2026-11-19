@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -21,6 +22,8 @@ import androidx.compose.ui.unit.dp
 import app.openhearing.dsp.audio.AppState
 import app.openhearing.dsp.dsp.MeasurementPolicy
 import app.openhearing.dsp.ui.AppVm
+import app.openhearing.dsp.ui.FitButton
+import app.openhearing.dsp.ui.WideButton
 
 @Composable
 fun MeasureScreen(state: AppState, modifier: Modifier, vm: AppVm, onStart: () -> Unit) {
@@ -38,7 +41,7 @@ fun MeasureScreen(state: AppState, modifier: Modifier, vm: AppVm, onStart: () ->
     Text("累计暴露约 ${"%.0f".format(ui.exposureSec)} 秒。${MeasurementPolicy.REST_HINT}")
     Text(ui.message)
     if (!state.running) {
-      Button(onClick = onStart) { Text("先打开监听（仍会按路由静音，直到确认为耳机）") }
+      WideButton(onClick = onStart, label = "先打开监听（仍会按路由静音，直到确认为耳机）")
     }
     if (!state.measurementRunning) {
       Button(onClick = vm::beginMeasurement, enabled = state.running) { Text("开始一轮测量") }
@@ -53,9 +56,16 @@ fun MeasureScreen(state: AppState, modifier: Modifier, vm: AppVm, onStart: () ->
       }
       if (ui.awaiting) {
         Text("0 听不到 · 1 刚听到 · 2 很轻但能听清 · 3 偏轻比较舒适 · 4 最舒适 · 5 较响仍舒适 · 6 太响就停")
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-          (0..6).forEach { rating ->
-            Button(onClick = { vm.rateStimulus(rating, android.os.SystemClock.elapsedRealtime() - shownAt) }) { Text("$rating") }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          listOf(0..3, 4..6).forEach { ratings ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+              ratings.forEach { rating ->
+                FitButton(
+                    onClick = { vm.rateStimulus(rating, android.os.SystemClock.elapsedRealtime() - shownAt) },
+                    label = "$rating",
+                )
+              }
+            }
           }
         }
       }

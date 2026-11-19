@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
@@ -27,6 +26,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.unit.dp
 import app.openhearing.dsp.audio.AppState
 import app.openhearing.dsp.dsp.GRAPHIC_HZ
+import app.openhearing.dsp.ui.FitButton
+import app.openhearing.dsp.ui.NumberButtonRows
 import app.openhearing.dsp.dsp.PeqBand
 import app.openhearing.dsp.ui.AppVm
 import kotlin.math.ln
@@ -47,9 +48,9 @@ fun EqScreen(state: AppState, modifier: Modifier, vm: AppVm) {
     Text("均衡", style = MaterialTheme.typography.headlineSmall)
     Text("左右独立。0 dB 的峰值段接近直通。16 kHz 在 48 kHz 下低于 0.45×奈奎斯特；采样率更低时该段会被拒绝或保持上一次稳定系数。")
     Text(if (state.running && state.diag.outputRate > 0) "曲线按实际输出 ${state.diag.outputRate} Hz 计算。" else "还没打开流，曲线按 ${rate} Hz 估算。")
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-      Button(onClick = { channel = 0 }) { Text(if (channel == 0) "左 ●" else "左") }
-      Button(onClick = { channel = 1 }) { Text(if (channel == 1) "右 ●" else "右") }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      FitButton(onClick = { channel = 0 }, label = if (channel == 0) "左 ●" else "左")
+      FitButton(onClick = { channel = 1 }, label = if (channel == 1) "右 ●" else "右")
     }
     Row {
       Text("均衡总旁路", modifier = Modifier.weight(1f))
@@ -72,11 +73,7 @@ fun EqScreen(state: AppState, modifier: Modifier, vm: AppVm) {
       )
     }
     Text("参数均衡，当前第 ${band + 1} 段", style = MaterialTheme.typography.titleMedium)
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-      for (i in 0 until 8) {
-        Button(onClick = { band = i }) { Text("${i + 1}") }
-      }
-    }
+    NumberButtonRows(count = 8, selected = band) { band = it }
     val spec = peq.getOrElse(band) { PeqBand() }
     fun write(next: PeqBand) {
       val list = peq.toMutableList()

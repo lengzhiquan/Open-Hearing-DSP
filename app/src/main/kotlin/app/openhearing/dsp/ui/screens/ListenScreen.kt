@@ -23,6 +23,9 @@ import app.openhearing.dsp.audio.AppState
 import app.openhearing.dsp.audio.ConfirmKind
 import app.openhearing.dsp.dsp.MicInputMode
 import app.openhearing.dsp.ui.AppVm
+import app.openhearing.dsp.ui.FitButton
+import app.openhearing.dsp.ui.FitTextButton
+import app.openhearing.dsp.ui.WideButton
 
 @Composable
 fun ListenScreen(
@@ -59,15 +62,15 @@ fun ListenScreen(
         if (state.calibrationWarning.isNotBlank()) Text(state.calibrationWarning)
       }
     }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-      Button(onClick = onStart, enabled = !state.running && !state.starting) { Text(if (state.starting) "协商中" else "开始监听") }
-      Button(onClick = onStop, enabled = state.running || state.starting) { Text("停止") }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      FitButton(onClick = onStart, enabled = !state.running && !state.starting, label = if (state.starting) "协商中" else "开始监听")
+      FitButton(onClick = onStop, enabled = state.running || state.starting, label = "停止")
     }
     if (state.confirm != ConfirmKind.None) {
       Text(state.confirmText)
-      Row {
-        Button(onClick = vm::confirm) { Text("确认本次出声") }
-        TextButton(onClick = vm::dismissConfirm) { Text("保持静音") }
+      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FitButton(onClick = vm::confirm, label = "确认本次出声")
+        FitTextButton(onClick = vm::dismissConfirm, label = "保持静音")
       }
     }
     if (state.presetStale) Button(onClick = vm::acknowledgeStale) { Text("我知道预设可能失效") }
@@ -78,10 +81,11 @@ fun ListenScreen(
         valueRange = -24f..12f,
     )
     Text("输入模式。默认固定内置麦克风，不跟随系统。")
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-      MicInputMode.entries.forEach { mode ->
-        TextButton(onClick = { vm.setInputMode(mode) }) { Text(if (state.inputMode == mode) "【${mode.label}】" else mode.label) }
-      }
+    MicInputMode.entries.forEach { mode ->
+      WideButton(
+          onClick = { vm.setInputMode(mode) },
+          label = if (state.inputMode == mode) "【${mode.label}】" else mode.label,
+      )
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
       Text("左右互换", modifier = Modifier.weight(1f))
@@ -89,9 +93,9 @@ fun ListenScreen(
     }
     if (state.inputMode == MicInputMode.TopMic) {
       Text("顶部声道还没核对时，立体声设备上的顶部模式会静音，避免把别的麦当成顶部。")
-      Row {
-        TextButton(onClick = { vm.setTopChannel(0) }) { Text(if (state.topChannel == 0) "【左】" else "左") }
-        TextButton(onClick = { vm.setTopChannel(1) }) { Text(if (state.topChannel == 1) "【右】" else "右") }
+      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FitTextButton(onClick = { vm.setTopChannel(0) }, label = if (state.topChannel == 0) "【左】" else "左")
+        FitTextButton(onClick = { vm.setTopChannel(1) }, label = if (state.topChannel == 1) "【右】" else "右")
       }
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -111,9 +115,9 @@ fun ListenScreen(
       Switch(checked = state.dsp.spectralNr, onCheckedChange = vm::setSpectral)
     }
     Text("麦克风校准：未校准默认不会套修正。主观匹配和参考麦克风是另外两档，都不能代替耳机声学校准。")
-    Row {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
       listOf(0 to "未校准", 1 to "主观匹配", 2 to "参考麦").forEach { (mode, label) ->
-        TextButton(onClick = { vm.setMicCalMode(mode) }) { Text(if (state.dsp.micCalMode == mode) "【$label】" else label) }
+        FitTextButton(onClick = { vm.setMicCalMode(mode) }, label = if (state.dsp.micCalMode == mode) "【$label】" else label)
       }
     }
     state.warnings.forEach { Text("· $it", style = MaterialTheme.typography.bodySmall) }
