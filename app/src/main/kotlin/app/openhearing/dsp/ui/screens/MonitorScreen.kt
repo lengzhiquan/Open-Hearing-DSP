@@ -20,6 +20,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import app.openhearing.dsp.audio.AppState
+import app.openhearing.dsp.ui.FitButton
 import app.openhearing.dsp.audio.ConfirmKind
 import app.openhearing.dsp.dsp.GainSetting
 import kotlin.math.pow
@@ -51,9 +52,9 @@ fun MonitorScreen(
         }
       }
     }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-      Button(onClick = onStart, enabled = !state.running && !state.starting) { Text(if (state.starting) "协商中" else "开始") }
-      Button(onClick = onStop, enabled = state.running || state.starting) { Text("停止") }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      FitButton(onClick = onStart, enabled = !state.running && !state.starting, label = if (state.starting) "协商中" else "开始")
+      FitButton(onClick = onStop, enabled = state.running || state.starting, label = "停止")
     }
     if (state.confirm != ConfirmKind.None) {
       Card {

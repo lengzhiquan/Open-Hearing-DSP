@@ -7,6 +7,7 @@ import app.openhearing.dsp.audio.AppState
 import app.openhearing.dsp.audio.EngineController
 import app.openhearing.dsp.dsp.DspConfig
 import app.openhearing.dsp.dsp.GainSetting
+import app.openhearing.dsp.dsp.MicInputMode
 import kotlinx.coroutines.flow.StateFlow
 
 class AppVm(app: Application) : AndroidViewModel(app) {
@@ -41,4 +42,33 @@ class AppVm(app: Application) : AndroidViewModel(app) {
   fun clearFault() = controller.clearFault()
   fun setAcoustic(text: String) = controller.setAcousticEntry(text)
   fun controllerNote(text: String) = controller.requestStop(text)
+  fun setInputMode(mode: MicInputMode) = controller.setInputMode(mode)
+  fun setChannelSwap(on: Boolean) = controller.setChannelSwap(on)
+  fun setTopChannel(channel: Int) = controller.setTopChannel(channel)
+  fun setManualOverride(on: Boolean) = controller.setManualInputOverride(on)
+  fun pinOutput(on: Boolean) = controller.pinOutput(on)
+  fun setHowling(on: Boolean) = controller.setHowling(on)
+  fun setNoiseControl(on: Boolean) = controller.setNoiseControl(on)
+  fun setSpectral(on: Boolean) = controller.setSpectral(on)
+  fun setMicCalMode(mode: Int) = controller.setMicCalMode(mode)
+  fun acknowledgeStale() = controller.acknowledgeStale()
+  fun confirmHeadphone() = controller.confirmHeadphone()
+  fun releaseSafeStart() = controller.releaseSafeStart()
+  fun saveProfile(name: String, headphone: String) = controller.saveCurrentProfile(name, headphone)
+  fun loadProfile(id: String) = controller.loadProfile(id)
+  fun copyProfile(id: String) = controller.copyProfile(id)
+  fun deleteProfile(id: String) = controller.deleteProfile(id)
+  fun saveDerived(name: String) = controller.saveDerived(name)
+  fun exportProfiles(confirmed: Boolean) = controller.exportProfiles(confirmed)
+  fun importProfiles(text: String, confirmed: Boolean) = controller.importProfiles(text, confirmed)
+  fun beginMeasurement() = controller.beginMeasurement()
+  fun stopMeasurement() = controller.stopMeasurement()
+  fun presentStimulus() = controller.presentStimulus()
+  fun rateStimulus(rating: Int, reactionMs: Long) = controller.rateStimulus(rating, reactionMs)
+  fun reportPain() = controller.reportPain()
+  fun reportSudden() = controller.reportSudden()
+  fun setBinaural(balance: Float, overall: Float) = controller.setBinauralTrim(balance, overall)
+  fun confirmBinaural() = controller.confirmBinaural()
+  fun runFit() = controller.runFit()
+  fun measurementLocksKeys(): Boolean = state.value.measurementRunning && app.openhearing.dsp.dsp.MeasurementPolicy.locksVolumeKeys()
 }

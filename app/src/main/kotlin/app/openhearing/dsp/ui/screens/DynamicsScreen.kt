@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
@@ -26,6 +25,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.unit.dp
 import app.openhearing.dsp.audio.AppState
+import app.openhearing.dsp.ui.FitButton
+import app.openhearing.dsp.ui.NumberButtonRows
 import app.openhearing.dsp.dsp.CompBand
 import app.openhearing.dsp.dsp.staticCompressorDb
 import app.openhearing.dsp.ui.AppVm
@@ -42,10 +43,10 @@ fun DynamicsScreen(state: AppState, modifier: Modifier, vm: AppVm) {
     Text("只按电平和频率改增益。没有语音检测、噪声门或降噪。多段使用 Linkwitz-Riley 4 分频，并用更高分频点的全通补偿相位。旁路某一段不会把它从分频里拿掉。")
     Text("实时压缩增益降低 ${"%.1f".format(state.diag.compGr)} dB，安全限幅 ${"%.1f".format(state.diag.safetyGr)} dB。")
     state.gainError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-      Button(onClick = { vm.updateDsp(dsp.copy(dynamicsMode = 0)) }) { Text(if (dsp.dynamicsMode == 0) "关 ●" else "关") }
-      Button(onClick = { vm.updateDsp(dsp.copy(dynamicsMode = 1)) }) { Text(if (dsp.dynamicsMode == 1) "单段 ●" else "单段") }
-      Button(onClick = { vm.updateDsp(dsp.copy(dynamicsMode = 2)) }) { Text(if (dsp.dynamicsMode == 2) "多段 ●" else "多段") }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      FitButton(onClick = { vm.updateDsp(dsp.copy(dynamicsMode = 0)) }, label = if (dsp.dynamicsMode == 0) "关 ●" else "关")
+      FitButton(onClick = { vm.updateDsp(dsp.copy(dynamicsMode = 1)) }, label = if (dsp.dynamicsMode == 1) "单段 ●" else "单段")
+      FitButton(onClick = { vm.updateDsp(dsp.copy(dynamicsMode = 2)) }, label = if (dsp.dynamicsMode == 2) "多段 ●" else "多段")
     }
     Text("模式切换大约 40 ms 交叉淡化，检测器继续跑，避免切回来时包络从零开始。")
     Text("单段压缩", style = MaterialTheme.typography.titleMedium)
@@ -73,11 +74,7 @@ fun DynamicsScreen(state: AppState, modifier: Modifier, vm: AppVm) {
       )
     }
     Text("正在编辑第 ${band + 1} 段。左右共用同一段增益，避免声像乱跳。")
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-      for (i in 0 until dsp.multiBandCount) {
-        Button(onClick = { band = i }) { Text("${i + 1}") }
-      }
-    }
+    NumberButtonRows(count = dsp.multiBandCount, selected = band) { band = it }
     val current = dsp.multi.getOrElse(band.coerceIn(0, 7)) { CompBand() }
     CompControls(current) { next ->
       val list = dsp.multi.toMutableList()

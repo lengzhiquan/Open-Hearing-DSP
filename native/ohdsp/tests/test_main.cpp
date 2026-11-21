@@ -735,6 +735,8 @@ static void test_smoothing_and_nan_params() {
   CHECK(!ohdsp::decodeParams(floats, ohdsp::kPackFloats, ints, ohdsp::kPackInts, decoded, nullptr));
 }
 
+int run_v21_tests();
+
 int main() {
   test_gain_math();
   test_identity_and_gain();
@@ -751,6 +753,7 @@ int main() {
   test_crossover_reconstruction();
   test_dynamic_coloration();
   test_smoothing_and_nan_params();
+  g_failed += run_v21_tests();
   if (g_failed) {
     std::printf("FAILED %d checks\n", g_failed);
     return 1;

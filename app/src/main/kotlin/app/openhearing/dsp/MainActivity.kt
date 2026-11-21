@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -36,6 +37,21 @@ class MainActivity : ComponentActivity() {
         RootScreen(vm = vm, onStart = { beginStart() }, onStop = { stopMonitor() })
       }
     }
+  }
+
+  override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+    if (consumeVolume(keyCode)) return true
+    return super.onKeyDown(keyCode, event)
+  }
+
+  override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+    if (consumeVolume(keyCode)) return true
+    return super.onKeyUp(keyCode, event)
+  }
+
+  private fun consumeVolume(keyCode: Int): Boolean {
+    if (!vm.measurementLocksKeys()) return false
+    return keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_MUTE
   }
 
   override fun onResume() {
