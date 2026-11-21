@@ -138,6 +138,15 @@ class V21PolicyTest {
   }
 
   @Test
+  fun volumeChangeMutesButDoesNotStop() {
+    assertEquals(VolumeWatch.FirstSample, watchMediaVolume(-1, null, 8, false))
+    assertEquals(VolumeWatch.Unchanged, watchMediaVolume(8, false, 8, false))
+    assertEquals(VolumeWatch.StaleMute, watchMediaVolume(8, false, 7, false))
+    assertEquals(VolumeWatch.StaleMute, watchMediaVolume(8, false, 8, true))
+    assertEquals(VolumeWatch.StaleMute, VolumeWatch.valueOf("StaleMute"))
+  }
+
+  @Test
   fun fitLayoutNamesEngineeringDefaults() {
     val packed = FloatArray(FitLayout.PACKED)
     packed[0] = 1f

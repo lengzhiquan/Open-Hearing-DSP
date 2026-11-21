@@ -28,6 +28,8 @@ import app.openhearing.dsp.dsp.Stair
 import app.openhearing.dsp.dsp.bandIndexForHz
 import app.openhearing.dsp.dsp.stepStair
 import app.openhearing.dsp.dsp.trialIsReliable
+import app.openhearing.dsp.dsp.VolumeWatch
+import app.openhearing.dsp.dsp.watchMediaVolume
 import app.openhearing.dsp.dsp.SessionRecord
 import app.openhearing.dsp.dsp.flatConfig
 import app.openhearing.dsp.dsp.hasPositiveGain
@@ -186,19 +188,26 @@ class EngineController(context: Context) {
           withContext(Dispatchers.Main) {
             val running = diag.running
             if (running && diag.stopRequested && !stopInProgress) {
-              stopInternal("路由变化、断开或错误。已硬静音并停止，不会自动恢复，也没有自动改用其他麦克风。")
+              val why = try {
+                bridge.nativeStopReason()
+              } catch (_: Throwable) {
+                "未记录"
+              }
+              stopInternal("路由变化、断开或错误（原因：$why）。已硬静音并停止，不会自动恢复，也没有自动改用其他麦克风。")
             }
             val vol = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
             val fixed = audio.isVolumeFixed
             val current = _state.value
             var stale = current.presetStale
             var staleReason = current.staleReason
-            if (observedVolume >= 0 && (vol != observedVolume || fixed != observedFixed)) {
-              stale = true
-              staleReason = "媒体音量或 USB 绝对音量状态变了。当前预设可能失效，请复核或重新测量。高增益已静音。"
-              if (running) {
-                bridge.nativeSetUserWantsAudible(false)
+            when (watchMediaVolume(observedVolume, observedFixed, vol, fixed)) {
+              // Stale and mute only. This path must not stop or latch the engine.
+              VolumeWatch.StaleMute -> {
+                stale = true
+                staleReason = "媒体音量或 USB 绝对音量状态变了。当前预设可能失效，请复核或重新测量。高增益已静音。"
+                if (running && !diag.stopRequested) bridge.nativeSetUserWantsAudible(false)
               }
+              VolumeWatch.FirstSample, VolumeWatch.Unchanged -> Unit
             }
             observedVolume = vol
             observedFixed = fixed

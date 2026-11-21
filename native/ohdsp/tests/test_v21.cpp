@@ -4,6 +4,7 @@
 #include "ohdsp/noise_floor.h"
 #include "ohdsp/processor.h"
 #include "ohdsp/route.h"
+#include "ohdsp/route_guard.h"
 #include "ohdsp/spectral_nr.h"
 
 #include <algorithm>
@@ -498,6 +499,29 @@ static void test_param_switch_is_finite() {
   CHECK(maxStep < 0.05f);
 }
 
+static void test_route_change_decision() {
+  const int usb = 106;
+  const int mic = 23;
+  const int speaker = 2;
+  const int same[] = {usb};
+  CHECK(ohdsp::decideRoutingCallback(usb, usb, true, mic, same, 1, 50, 300) == ohdsp::RouteAction::KeepRunning);
+  CHECK(ohdsp::decideRoutingCallback(usb, usb, true, mic, same, 1, 5000, 300) == ohdsp::RouteAction::KeepRunning);
+  CHECK(ohdsp::decideRoutingCallback(usb, 0, false, mic, same, 1, 20, 300) == ohdsp::RouteAction::KeepRunning);
+  const int inputOnly[] = {mic};
+  CHECK(ohdsp::decideRoutingCallback(usb, usb, true, mic, inputOnly, 1, 40, 300) == ohdsp::RouteAction::KeepRunning);
+  const int other[] = {speaker};
+  CHECK(ohdsp::decideRoutingCallback(usb, usb, true, mic, other, 1, 50, 300) == ohdsp::RouteAction::HardStop);
+  CHECK(ohdsp::decideRoutingCallback(usb, usb, true, mic, other, 1, 5000, 300) == ohdsp::RouteAction::HardStop);
+  CHECK(ohdsp::decideRoutingCallback(usb, usb, true, mic, nullptr, 0, 10, 300) == ohdsp::RouteAction::HardStop);
+  CHECK(ohdsp::decideRoutingCallback(usb, usb, true, mic, same, 0, 10, 300) == ohdsp::RouteAction::HardStop);
+
+  CHECK(ohdsp::decideOutputCallbackDevice(usb, usb, true, usb) == ohdsp::RouteAction::KeepRunning);
+  CHECK(ohdsp::decideOutputCallbackDevice(usb, 0, true, usb) == ohdsp::RouteAction::KeepRunning);
+  CHECK(ohdsp::decideOutputCallbackDevice(0, usb, true, usb) == ohdsp::RouteAction::KeepRunning);
+  CHECK(ohdsp::decideOutputCallbackDevice(speaker, usb, true, usb) == ohdsp::RouteAction::HardStop);
+  CHECK(ohdsp::decideOutputCallbackDevice(speaker, 0, false, usb) == ohdsp::RouteAction::KeepRunning);
+}
+
 int run_v21_tests() {
   test_mapping_and_levels();
   test_route_sum_swap_top_and_comb();
@@ -507,5 +531,6 @@ int run_v21_tests() {
   test_processor_matches_static_curve();
   test_measurement_ceiling_and_howling_and_nr();
   test_param_switch_is_finite();
+  test_route_change_decision();
   return g_v21;
 }

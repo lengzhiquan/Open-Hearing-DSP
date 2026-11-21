@@ -2,6 +2,7 @@
 
 #include "ohdsp/eq.h"
 #include "ohdsp/param_pack.h"
+#include "ohdsp/route_guard.h"
 
 #include "callbacks.h"
 
@@ -145,11 +146,16 @@ void Engine::appendLog(const std::string& line) {
   log_ += '\n';
 }
 
-void Engine::noteStop(const char* why) {
+void Engine::noteStop(int cause, int routedId, int liveId, int expectId) {
+  stopCause_.store(cause, std::memory_order_release);
+  stopRoutedId_.store(routedId, std::memory_order_release);
+  stopLiveId_.store(liveId, std::memory_order_release);
+  stopExpectId_.store(expectId, std::memory_order_release);
   stopRequested_.store(1, std::memory_order_release);
   outputCleared_.store(0, std::memory_order_release);
   userWants_.store(0, std::memory_order_release);
-  __android_log_print(ANDROID_LOG_WARN, kLogTag, "stop latch: %s", why);
+  __android_log_print(ANDROID_LOG_WARN, kLogTag, "stop latch cause=%d routed=%d live=%d expect=%d", cause, routedId,
+                      liveId, expectId);
 }
 
 bool Engine::openOne(oboe::Direction dir, const Spec& spec, int deviceId, oboe::InputPreset preset, bool session,
@@ -219,6 +225,11 @@ std::string Engine::start(int inputDeviceId, int outputDeviceId, bool preferUnpr
   stopRequested_.store(0, std::memory_order_release);
   outputCleared_.store(0, std::memory_order_release);
   clearedDeviceId_.store(0, std::memory_order_release);
+  stopCause_.store(0, std::memory_order_release);
+  stopRoutedId_.store(-1, std::memory_order_release);
+  stopLiveId_.store(-1, std::memory_order_release);
+  stopExpectId_.store(-1, std::memory_order_release);
+  reasonLogged_.store(0, std::memory_order_release);
   userWants_.store(0, std::memory_order_release);
   acceptRoute_.store(0, std::memory_order_release);
   lastError_.store(0, std::memory_order_release);
@@ -408,6 +419,11 @@ std::string Engine::start(int inputDeviceId, int outputDeviceId, bool preferUnpr
     output_.reset();
     return "ERR\n" + log_;
   }
+  openedOutId_.store(outDevice_, std::memory_order_release);
+  openedInId_.store(inDevice_, std::memory_order_release);
+  timespec started{};
+  clock_gettime(CLOCK_MONOTONIC, &started);
+  startMonoNs_.store(started.tv_sec * 1000000000LL + started.tv_nsec, std::memory_order_release);
   acceptRoute_.store(1, std::memory_order_release);
   appendLog("流已启动，输出仍硬静音，直到界面核对路由并明确允许出声。扬声器不会自动出声。");
   __android_log_print(ANDROID_LOG_INFO, kLogTag, "streams started in=%d out=%d", inDevice_, outDevice_);
@@ -493,7 +509,46 @@ void Engine::setOutputCleared(int deviceId, bool cleared) {
   outputCleared_.store(cleared ? 1 : 0, std::memory_order_release);
 }
 
-void Engine::latchMuteAndStop() { noteStop("external latch"); }
+void Engine::latchMuteAndStop() { noteStop(7, -1, -1, openedOutId_.load(std::memory_order_acquire)); }
+
+std::string Engine::stopReasonText() {
+  const int cause = stopCause_.load(std::memory_order_acquire);
+  const int routed = stopRoutedId_.load(std::memory_order_acquire);
+  const int live = stopLiveId_.load(std::memory_order_acquire);
+  const int expect = stopExpectId_.load(std::memory_order_acquire);
+  const int err = lastError_.load(std::memory_order_acquire);
+  std::string text = "未记录";
+  switch (cause) {
+    case 1:
+      text = "oboe onRoutingChanged，新设备 id " + std::to_string(routed) + "，原先 " + std::to_string(expect);
+      break;
+    case 2:
+      text = "oboe onRoutingChanged，设备列表为空";
+      break;
+    case 3:
+      text = "回调里输出设备 id 从 " + std::to_string(expect) + " 变成 " + std::to_string(live);
+      break;
+    case 4:
+      text = "输入断开";
+      break;
+    case 5:
+      text = "输入读断开";
+      break;
+    case 6:
+      text = "oboe onErrorAfterClose，错误码 " + std::to_string(err);
+      break;
+    case 7:
+      text = "设备列表变化或外部停止";
+      break;
+    default:
+      break;
+  }
+  if (cause != 0 && reasonLogged_.exchange(1, std::memory_order_acq_rel) == 0) {
+    std::lock_guard<std::mutex> lock(control_);
+    appendLog("停止原因：" + text);
+  }
+  return text;
+}
 
 void Engine::clearFault() { processor_.requestClearFault(); }
 
@@ -556,9 +611,11 @@ oboe::DataCallbackResult Engine::onAudioReady(oboe::AudioStream* stream, void* a
 
   const int liveId = stream != nullptr ? stream->getDeviceId() : -1;
   const bool cleared = outputCleared_.load(std::memory_order_acquire) != 0;
-  const int expect = clearedDeviceId_.load(std::memory_order_acquire);
-  if (cleared && liveId != expect) {
-    noteStop("output device id changed inside callback");
+  const int clearedId = clearedDeviceId_.load(std::memory_order_acquire);
+  const int openedOut = openedOutId_.load(std::memory_order_acquire);
+  if (ohdsp::decideOutputCallbackDevice(liveId, clearedId, cleared, openedOut) == ohdsp::RouteAction::HardStop) {
+    const int expect = clearedId > 0 ? clearedId : openedOut;
+    noteStop(3, -1, liveId, expect);
     silence(audioData, numFrames);
     return oboe::DataCallbackResult::Stop;
   }
@@ -569,7 +626,7 @@ oboe::DataCallbackResult Engine::onAudioReady(oboe::AudioStream* stream, void* a
     if (!avail) {
       inputReadErrors_.fetch_add(1, std::memory_order_relaxed);
       if (avail.error() == oboe::Result::ErrorDisconnected) {
-        noteStop("input disconnected");
+        noteStop(4, -1, liveId, openedOut);
         return oboe::DataCallbackResult::Stop;
       }
     } else {
@@ -584,7 +641,7 @@ oboe::DataCallbackResult Engine::onAudioReady(oboe::AudioStream* stream, void* a
           if (!r) {
             inputReadErrors_.fetch_add(1, std::memory_order_relaxed);
             if (r.error() == oboe::Result::ErrorDisconnected) {
-              noteStop("input read disconnected");
+              noteStop(5, -1, liveId, openedOut);
               return oboe::DataCallbackResult::Stop;
             }
             break;
@@ -596,7 +653,7 @@ oboe::DataCallbackResult Engine::onAudioReady(oboe::AudioStream* stream, void* a
           if (!r) {
             inputReadErrors_.fetch_add(1, std::memory_order_relaxed);
             if (r.error() == oboe::Result::ErrorDisconnected) {
-              noteStop("input read disconnected");
+              noteStop(5, -1, liveId, openedOut);
               return oboe::DataCallbackResult::Stop;
             }
             break;
@@ -613,7 +670,8 @@ oboe::DataCallbackResult Engine::onAudioReady(oboe::AudioStream* stream, void* a
     }
   }
 
-  const bool routeOk = cleared && liveId == expect;
+  const int expectOut = (cleared && clearedId > 0) ? clearedId : openedOut;
+  const bool routeOk = cleared && liveId > 0 && (liveId == expectOut || liveId == openedOut);
   const bool want = userWants_.load(std::memory_order_acquire) != 0 &&
                     focusMuted_.load(std::memory_order_acquire) == 0 && !processor_.faulted();
   processor_.setAudible(routeOk && want);
@@ -649,17 +707,36 @@ oboe::DataCallbackResult Engine::onAudioReady(oboe::AudioStream* stream, void* a
 
 void Engine::onErrorAfterClose(oboe::AudioStream*, oboe::Result error) {
   lastError_.store(static_cast<int>(error), std::memory_order_relaxed);
-  noteStop("oboe onErrorAfterClose");
+  noteStop(6, -1, -1, openedOutId_.load(std::memory_order_acquire));
 }
 
 void Engine::onRoutingChanged(oboe::AudioStream*, const int32_t* deviceIds, int32_t numDevices) {
   if (!acceptRoute_.load(std::memory_order_acquire)) return;
   routeGen_.fetch_add(1, std::memory_order_relaxed);
-  if (numDevices > 0 && deviceIds != nullptr) {
-    // The id is observed; mismatch with the cleared id also stops the callback.
-    (void)deviceIds[0];
+  const int openedOut = openedOutId_.load(std::memory_order_acquire);
+  const int openedIn = openedInId_.load(std::memory_order_acquire);
+  const bool cleared = outputCleared_.load(std::memory_order_acquire) != 0;
+  const int clearedId = clearedDeviceId_.load(std::memory_order_acquire);
+  timespec now{};
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  const int64_t nowNs = now.tv_sec * 1000000000LL + now.tv_nsec;
+  const int64_t startNs = startMonoNs_.load(std::memory_order_acquire);
+  const long long elapsedMs = startNs > 0 ? (nowNs - startNs) / 1000000LL : 1000;
+  const auto action = ohdsp::decideRoutingCallback(openedOut, clearedId, cleared, openedIn, deviceIds, numDevices, elapsedMs, 300);
+  if (action == ohdsp::RouteAction::KeepRunning) return;
+  int reported = -1;
+  if (deviceIds != nullptr) {
+    const int outputId = (cleared && clearedId > 0) ? clearedId : openedOut;
+    for (int i = 0; i < numDevices; ++i) {
+      if (deviceIds[i] > 0 && deviceIds[i] != outputId && deviceIds[i] != openedIn) {
+        reported = deviceIds[i];
+        break;
+      }
+    }
   }
-  noteStop("oboe onRoutingChanged");
+  const int expect = (cleared && clearedId > 0) ? clearedId : openedOut;
+  if (deviceIds == nullptr || numDevices <= 0) noteStop(2, reported, -1, expect);
+  else noteStop(1, reported, -1, expect);
 }
 
 void Engine::fillDiag(int32_t* ints, int nInt, float* floats, int nFloat, int64_t* longs, int nLong) {
@@ -783,7 +860,7 @@ void Engine::fillDiag(int32_t* ints, int nInt, float* floats, int nFloat, int64_
   zi(60, (requestedInChannels_ > 0 && inChannels_ == requestedInChannels_) ? 1 : 0);
   zi(61, meters.howlingEvents);
   zi(62, meters.spectralActive);
-  zi(63, 0);
+  zi(63, stopCause_.load(std::memory_order_acquire));
 
   zf(0, meters.inPeakDbL);
   zf(1, meters.inPeakDbR);

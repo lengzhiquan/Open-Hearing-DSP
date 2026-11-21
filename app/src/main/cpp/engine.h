@@ -40,6 +40,7 @@ class Engine : public std::enable_shared_from_this<Engine> {
   void clearFault();
   std::string armPulse(bool permitted);
   std::string attemptLog();
+  std::string stopReasonText();
 
   void fillDiag(int32_t* ints, int nInt, float* floats, int nFloat, int64_t* longs, int nLong);
 
@@ -63,7 +64,7 @@ class Engine : public std::enable_shared_from_this<Engine> {
   void appendLog(const std::string& line);
   void silence(void* audioData, int frames) const;
   void publishOutput(void* audioData, const float* stereo, int frames) const;
-  void noteStop(const char* why);
+  void noteStop(int cause, int routedId, int liveId, int expectId);
 
   std::mutex control_;
   std::string log_;
@@ -89,6 +90,14 @@ class Engine : public std::enable_shared_from_this<Engine> {
   std::atomic<int> acceptRoute_{0};
   std::atomic<int> routeGen_{0};
   std::atomic<int> lastError_{0};
+  std::atomic<int> stopCause_{0};
+  std::atomic<int> stopRoutedId_{-1};
+  std::atomic<int> stopLiveId_{-1};
+  std::atomic<int> stopExpectId_{-1};
+  std::atomic<int> openedOutId_{0};
+  std::atomic<int> openedInId_{0};
+  std::atomic<int64_t> startMonoNs_{0};
+  std::atomic<int> reasonLogged_{0};
   std::atomic<int64_t> lastDspNs_{0};
   std::atomic<int64_t> maxDspNs_{0};
   std::atomic<int> lastCallbackFrames_{0};

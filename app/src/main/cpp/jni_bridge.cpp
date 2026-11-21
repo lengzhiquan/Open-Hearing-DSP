@@ -200,6 +200,12 @@ extern "C" JNIEXPORT jint JNICALL Java_app_openhearing_dsp_audio_NativeBridge_na
   return 0;
 }
 
+extern "C" JNIEXPORT jstring JNICALL Java_app_openhearing_dsp_audio_NativeBridge_nativeStopReason(JNIEnv* env, jobject) {
+  std::lock_guard<std::mutex> lock(gCtrl);
+  if (!gEngine) return toJ(env, "未记录");
+  return toJ(env, gEngine->stopReasonText());
+}
+
 extern "C" JNIEXPORT jstring JNICALL Java_app_openhearing_dsp_audio_NativeBridge_nativeAttemptLog(JNIEnv* env, jobject) {
   std::lock_guard<std::mutex> lock(gCtrl);
   if (!gEngine) return toJ(env, "");
