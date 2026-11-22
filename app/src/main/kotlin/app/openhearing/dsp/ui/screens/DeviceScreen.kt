@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import app.openhearing.dsp.audio.AppState
 import app.openhearing.dsp.audio.AudioDev
 import app.openhearing.dsp.audio.ConfirmKind
+import app.openhearing.dsp.dsp.isNonMicType
 import app.openhearing.dsp.ui.AppVm
 
 @Composable
@@ -50,6 +51,7 @@ fun DeviceScreen(state: AppState, modifier: Modifier, vm: AppVm) {
       verticalArrangement = Arrangement.spacedBy(10.dp),
   ) {
     Text("设备与延迟", style = MaterialTheme.typography.headlineSmall)
+    Text("常规监听固定内置麦克风，输出跟随系统。在这里手动选非内置麦克风只会作为实验，并使麦克风校准失效，需要重新测量。非麦克风类型不会出现在监听页的输入模式里。")
     Text(state.unprocessedProperty)
     Row(verticalAlignment = Alignment.CenterVertically) {
       Text("请求 UNPROCESSED（仅当上面写支持时才会真正带上）", modifier = Modifier.weight(1f))
@@ -63,8 +65,20 @@ fun DeviceScreen(state: AppState, modifier: Modifier, vm: AppVm) {
       Text("分配 session 并尝试关闭 AGC/NS/AEC（可能更慢）", modifier = Modifier.weight(1f))
       Switch(checked = state.tryEffectSession, onCheckedChange = vm::setTrySession, enabled = !state.running)
     }
-    Text("手动选择是尽力而为。组合不被系统接受时会失败，不会偷偷改到扬声器。默认 0 表示跟随系统路由。")
-    DeviceMenu("输入", state.inputs, state.selectedInput, !state.running, vm::selectInput)
+    Text("手动选择是尽力而为。组合不被系统接受时会失败，不会偷偷改到扬声器。输出默认 0，跟随系统。")
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text("实验：用下面选中的输入覆盖内置麦克风。这会使校准失效。", modifier = Modifier.weight(1f))
+      Switch(checked = state.manualInputOverride, onCheckedChange = vm::setManualOverride, enabled = !state.running)
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text("实验：固定输出设备，不再跟随系统", modifier = Modifier.weight(1f))
+      Switch(checked = state.outputPinned, onCheckedChange = { vm.pinOutput(it) }, enabled = !state.running)
+    }
+    DeviceMenu("输入", state.inputs.filter { !isNonMicType(it.type) }, state.selectedInput, !state.running, vm::selectInput)
+    val hidden = state.inputs.filter { isNonMicType(it.type) }
+    if (hidden.isNotEmpty()) {
+      Text("诊断列表里的非麦克风输入（不能当监听输入）：" + hidden.joinToString("；") { "${it.name} 类型 ${it.type} id ${it.id}" })
+    }
     DeviceMenu("输出", state.outputs, state.selectedOutput, !state.running, vm::selectOutput)
     Button(onClick = vm::refreshDevices) { Text("刷新设备列表") }
     Text(state.effectText)

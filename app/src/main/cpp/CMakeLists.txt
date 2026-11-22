@@ -9,7 +9,8 @@ add_subdirectory(${OBOE_DIR} ${CMAKE_BINARY_DIR}/oboe)
 add_library(openhearing SHARED
         jni_bridge.cpp
         engine.cpp
-        ${OHDSP_DIR}/src/processor.cpp)
+        ${OHDSP_DIR}/src/processor.cpp
+        ${OHDSP_DIR}/src/fit.cpp)
 
 target_include_directories(openhearing PRIVATE
         ${OHDSP_DIR}/include

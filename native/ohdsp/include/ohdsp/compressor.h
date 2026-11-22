@@ -68,6 +68,25 @@ class Compressor {
     r *= gain;
   }
 
+  // Band-RMS detector. `instantRms` is linear. Attack and release still slew the
+  // envelope; the static knee is the same function the fitter calls.
+  void processWithLevel(float& l, float& r, float instantRms) {
+    if (!std::isfinite(instantRms) || instantRms < 0.f) instantRms = 0.f;
+    const float coeff = instantRms > env_ ? attackCoeff_ : releaseCoeff_;
+    env_ = coeff * env_ + (1.f - coeff) * instantRms;
+    if (!std::isfinite(env_) || env_ < 0.f) env_ = 0.f;
+    const float levelDb = linToDb(env_);
+    const float outDb = staticCompressorDb(levelDb, band_.thresholdDb, band_.ratio, band_.kneeDb) + band_.makeupDb;
+    float reduction = levelDb - (outDb - band_.makeupDb);
+    if (reduction < 0.f) reduction = 0.f;
+    grDb_ = band_.bypass ? 0.f : reduction;
+    if (band_.bypass) return;
+    const float gain = dbToLin(outDb - levelDb);
+    if (!std::isfinite(gain)) return;
+    l *= gain;
+    r *= gain;
+  }
+
  private:
   void setTimes(float attackMs, float releaseMs) {
     auto coeff = [&](float ms) {

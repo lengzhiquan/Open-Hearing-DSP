@@ -3,12 +3,17 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <string>
 
+#include "ohdsp/analysis.h"
 #include "ohdsp/dynamics.h"
 #include "ohdsp/eq.h"
+#include "ohdsp/howling.h"
 #include "ohdsp/limiter.h"
 #include "ohdsp/param_bus.h"
+#include "ohdsp/route.h"
+#include "ohdsp/spectral_nr.h"
 
 namespace ohdsp {
 
@@ -29,6 +34,9 @@ struct MeterBlock {
   int fault = 0;
   int monoCopied = 0;
   int pulseRejected = 0;
+  int howlingEvents = 0;
+  float howlingReductionDb = 0.f;
+  int spectralActive = 0;
 };
 
 struct Smoother {
@@ -64,6 +72,12 @@ class Processor {
   // One-shot raised-cosine burst, peak -20 dBFS, about 1 ms.
   // Refused when not permitted (route not cleared). The safety limiter still sees it.
   void armMeasurementPulse(bool permitted);
+
+  // Stimulus is mixed after the microphone path and before the limiters.
+  // ear: 0 both, 1 left, 2 right. Amplitude is linear, before the measurement cap.
+  // kind 1 warble, kind 2 pink noise for overall-loudness baseline. Default stays warble.
+  void setStimulus(int enabled, float freqHz, float amplitude, int ear, int kind = 1);
+  void copyBandDb(float* inDb, float* outDb) const;
 
   bool faulted() const { return fault_.load(std::memory_order_acquire) != 0; }
   void requestClearFault() { clearFault_.store(1, std::memory_order_release); }
@@ -115,7 +129,43 @@ class Processor {
   std::atomic<float> pubUserGr_{0};
   std::atomic<float> pubCompGr_{0};
   EqBank eq_{};
+  EqBank micEq_{};
   DynamicsBank dyn_{};
+  RouteState route_{};
+  SpectralNr spectral_{};
+  HowlingGuard howling_{};
+  Crossover detectSplit_{};
+  Crossover inMeter_{};
+  Crossover outMeter_{};
+  PeakLimiter measureLim_{};
+  float detPwrL_[kMaxDynamicsBands] = {};
+  float detPwrR_[kMaxDynamicsBands] = {};
+  float inBandPwr_[kAnalysisBands] = {};
+  float outBandPwr_[kAnalysisBands] = {};
+  float sideRms_[kMaxDynamicsBands] = {};
+  int detectBands_ = 0;
+  float detCoeff_ = 0.f;
+  float micThru_ = 1.f;
+  float micThruCoeff_ = 0.f;
+  float stimAmp_ = 0.f;
+  float stimAmpCoeff_ = 0.f;
+  double stimCarrier_ = 0.0;
+  double stimMod_ = 0.0;
+  float pinkB0_ = 0.f;
+  float pinkB1_ = 0.f;
+  float pinkB2_ = 0.f;
+  uint32_t pinkRng_ = 0xA5A5u;
+  int measureClips_ = 0;
+  std::atomic<int> stimOn_{0};
+  std::atomic<int> stimEar_{0};
+  std::atomic<int> stimKind_{1};
+  std::atomic<int> stimFreqBits_{0};
+  std::atomic<int> stimAmpBits_{0};
+  std::atomic<int> pubHowlEvents_{0};
+  std::atomic<int> pubSpectral_{0};
+  std::atomic<float> pubHowlDb_{0};
+  std::atomic<int> pubInBandBits_[kAnalysisBands]{};
+  std::atomic<int> pubOutBandBits_[kAnalysisBands]{};
   float rmsInL_ = 0.f;
   float rmsInR_ = 0.f;
   float rmsOutL_ = 0.f;

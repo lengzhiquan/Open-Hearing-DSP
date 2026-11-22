@@ -21,6 +21,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import app.openhearing.dsp.ui.FitButton
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import app.openhearing.dsp.audio.AppState
@@ -52,11 +53,13 @@ fun ExperimentScreen(state: AppState, modifier: Modifier, vm: AppVm) {
     listOf("A 保护直通", "B 输入增益", "C 增益+均衡", "D +单段压缩", "E +多段").forEachIndexed { index, label ->
       Button(onClick = { vm.experiment(index) }, modifier = Modifier.fillMaxWidth()) { Text(label) }
     }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-      Button(onClick = { vm.storeSlot("A") }) { Text("存到 A") }
-      Button(onClick = { vm.recallSlot("A") }) { Text("切到 A") }
-      Button(onClick = { vm.storeSlot("B") }) { Text("存到 B") }
-      Button(onClick = { vm.recallSlot("B") }) { Text("切到 B") }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      FitButton(onClick = { vm.storeSlot("A") }, label = "存到 A")
+      FitButton(onClick = { vm.recallSlot("A") }, label = "切到 A")
+    }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      FitButton(onClick = { vm.storeSlot("B") }, label = "存到 B")
+      FitButton(onClick = { vm.recallSlot("B") }, label = "切到 B")
     }
     Text("A/B 是两套参数的平滑切换，不是两套引擎同时跑。")
     OutlinedTextField(reference, { reference = it }, modifier = Modifier.fillMaxWidth(), label = { Text("响度参照预设名") })
@@ -77,9 +80,9 @@ fun ExperimentScreen(state: AppState, modifier: Modifier, vm: AppVm) {
     Button(onClick = { vm.savePreset(name) }) { Text("把当前参数另存") }
     OutlinedTextField(oldName, { oldName = it }, modifier = Modifier.fillMaxWidth(), label = { Text("要改名的自定义预设") })
     Button(onClick = { vm.renamePreset(oldName, name) }) { Text("把旧名改成上面的新名") }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-      Button(onClick = { export.launch("open-hearing-dsp-presets.json") }) { Text("导出 JSON") }
-      Button(onClick = { import.launch(arrayOf("application/json")) }) { Text("导入 JSON") }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      FitButton(onClick = { export.launch("open-hearing-dsp-presets.json") }, label = "导出 JSON")
+      FitButton(onClick = { import.launch(arrayOf("application/json")) }, label = "导入 JSON")
     }
     Text("导入只接受 schema 1。超出范围、NaN 或分频不合法会整份拒绝。")
     Text("主观记录", style = MaterialTheme.typography.titleMedium)

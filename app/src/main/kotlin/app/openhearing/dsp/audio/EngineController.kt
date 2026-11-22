@@ -15,8 +15,29 @@ import android.os.Handler
 import android.os.Looper
 import app.openhearing.dsp.OpenHearingApp
 import app.openhearing.dsp.dsp.DspConfig
+import app.openhearing.dsp.dsp.FitLayout
 import app.openhearing.dsp.dsp.GainSetting
+import app.openhearing.dsp.dsp.HEALTH_DATA_WARNING
+import app.openhearing.dsp.dsp.HearingProfile
+import app.openhearing.dsp.dsp.InputChoice
+import app.openhearing.dsp.dsp.MeasurementPolicy
+import app.openhearing.dsp.dsp.MeasurementUi
+import app.openhearing.dsp.dsp.MicInputMode
 import app.openhearing.dsp.dsp.PresetFile
+import app.openhearing.dsp.dsp.Stair
+import app.openhearing.dsp.dsp.bandIndexForHz
+import app.openhearing.dsp.dsp.stepStair
+import app.openhearing.dsp.dsp.trialIsReliable
+import app.openhearing.dsp.dsp.BaselineAction
+import app.openhearing.dsp.dsp.BaselinePolicy
+import app.openhearing.dsp.dsp.MeasureStage
+import app.openhearing.dsp.dsp.VolumeWatch
+import app.openhearing.dsp.dsp.applyBaseline
+import app.openhearing.dsp.dsp.canRunFrequencyTests
+import app.openhearing.dsp.dsp.defaultTestPresetName
+import app.openhearing.dsp.dsp.locksVolumeDuring
+import app.openhearing.dsp.dsp.shouldOfferSave
+import app.openhearing.dsp.dsp.watchMediaVolume
 import app.openhearing.dsp.dsp.SessionRecord
 import app.openhearing.dsp.dsp.flatConfig
 import app.openhearing.dsp.dsp.hasPositiveGain
@@ -52,6 +73,9 @@ data class AudioDev(
     val typeLabel: String,
     val kind: RouteKind,
     val input: Boolean,
+    val channelCounts: List<Int> = emptyList(),
+    val address: String = "",
+    val productName: String = "",
 )
 
 enum class ConfirmKind { None, Speaker, Bluetooth, Usb, Unknown }
@@ -91,6 +115,25 @@ data class AppState(
     val presetMessage: String = "",
     val slotA: DspConfig? = null,
     val slotB: DspConfig? = null,
+    val inputMode: MicInputMode = MicInputMode.StereoDual,
+    val channelSwap: Boolean = false,
+    val topChannel: Int = -1,
+    val manualInputOverride: Boolean = false,
+    val outputPinned: Boolean = false,
+    val profiles: List<HearingProfile> = emptyList(),
+    val activeProfileId: String? = null,
+    val pendingFullDsp: DspConfig? = null,
+    val safeStart: Boolean = false,
+    val profileMessage: String = "",
+    val presetStale: Boolean = false,
+    val staleReason: String = "",
+    val calibrationWarning: String = "",
+    val measurementRunning: Boolean = false,
+    val measurement: MeasurementUi = MeasurementUi(),
+    val mediaVolume: Int = -1,
+    val volumeFixed: Boolean? = null,
+    val fitLines: List<String> = emptyList(),
+    val headphoneConfirmed: Boolean = false,
 )
 
 class EngineController(context: Context) {
@@ -107,6 +150,9 @@ class EngineController(context: Context) {
   private val json = Json { prettyPrint = true; ignoreUnknownKeys = true; encodeDefaults = true }
   private val presetStore = File(appContext.filesDir, "presets.json")
   private val recordStore = File(appContext.filesDir, "records.json")
+  private val profileStore = File(appContext.filesDir, "profiles_v2.json")
+  private var observedVolume = -1
+  private var observedFixed: Boolean? = null
 
   private val _state = MutableStateFlow(
       AppState(
@@ -150,15 +196,43 @@ class EngineController(context: Context) {
           withContext(Dispatchers.Main) {
             val running = diag.running
             if (running && diag.stopRequested && !stopInProgress) {
-              stopInternal("路由变化、断开或错误。已硬静音并停止，不会自动恢复。")
+              val why = try {
+                bridge.nativeStopReason()
+              } catch (_: Throwable) {
+                "未记录"
+              }
+              stopInternal("路由变化、断开或错误（原因：$why）。已硬静音并停止，不会自动恢复，也没有自动改用其他麦克风。")
             }
+            val vol = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
+            val fixed = audio.isVolumeFixed
+            val current = _state.value
+            var stale = current.presetStale
+            var staleReason = current.staleReason
+            when (watchMediaVolume(observedVolume, observedFixed, vol, fixed)) {
+              // Stale and mute only. This path must not stop or latch the engine.
+              VolumeWatch.StaleMute -> {
+                stale = true
+                staleReason = "媒体音量或 USB 绝对音量状态变了。当前预设可能失效，请复核或重新测量。高增益已静音。"
+                if (running && !diag.stopRequested && !current.measurementRunning) bridge.nativeSetUserWantsAudible(false)
+              }
+              VolumeWatch.FirstSample, VolumeWatch.Unchanged -> Unit
+            }
+            observedVolume = vol
+            observedFixed = fixed
             _state.update {
               it.copy(
                   running = running && !diag.stopRequested,
                   diag = diag,
                   report = formatDiag(diag),
                   attemptLog = log,
-                  warnings = buildWarnings(it.gains, diag, it.preferUnprocessed),
+                  warnings = buildWarnings(it.gains, diag, it.preferUnprocessed, staleReason),
+                  mediaVolume = vol,
+                  volumeFixed = fixed,
+                  presetStale = stale,
+                  staleReason = staleReason,
+                  measurement = if (it.measurementRunning && it.measurement.stimulusOn) {
+                    it.measurement.copy(exposureSec = MeasurementPolicy.addExposure(it.measurement.exposureSec, 0.12f, true))
+                  } else it.measurement,
               )
             }
           }
@@ -250,11 +324,24 @@ class EngineController(context: Context) {
       }
       val unprocessedOk = cur.unprocessedProperty.startsWith("系统属性报告支持")
       val result = try {
+        val choice = resolveInput(cur)
+        if (choice is InputChoice.Unavailable) {
+          withContext(Dispatchers.Main) {
+            abandonFocus()
+            _state.update {
+              it.copy(starting = false, running = false, status = choice.reason, calibrationWarning = choice.reason)
+            }
+          }
+          return@launch
+        }
+        val ready = choice as InputChoice.Ready
+        val outputId = if (cur.outputPinned) cur.selectedOutput else 0
         bridge.nativeStart(
-            cur.selectedInput,
-            cur.selectedOutput,
+            ready.device.id,
+            outputId,
             cur.preferUnprocessed && unprocessedOk,
             cur.tryEffectSession,
+            ready.requestedChannels,
         )
       } catch (t: Throwable) {
         "ERR\n${t.message}"
@@ -263,8 +350,15 @@ class EngineController(context: Context) {
         refreshDevices()
         if (!result.startsWith("OK")) {
           abandonFocus()
+          val mismatch = result.startsWith("MISMATCH")
           _state.update {
-            it.copy(starting = false, running = false, status = "打开失败。没有自动改路由。", attemptLog = result)
+            it.copy(
+                starting = false,
+                running = false,
+                status = if (mismatch) "实际打开的输入和请求不一致。已停止并静音，没有自动改麦克风。" else "打开失败。没有自动改路由。",
+                attemptLog = result,
+                calibrationWarning = if (mismatch) "这次打开不能当作该输入模式的校准或拟合依据。" else it.calibrationWarning,
+            )
           }
           appContext.startService(
               android.content.Intent(appContext, app.openhearing.dsp.service.MonitorService::class.java)
@@ -486,7 +580,15 @@ class EngineController(context: Context) {
     )
     val saved = readList(presetStore, PresetFile.serializer()).filter { !it.builtin }
     val records = readList(recordStore, SessionRecord.serializer())
-    _state.update { it.copy(presets = builtins + saved, records = records) }
+    val profiles = if (profileStore.exists()) {
+      readList(profileStore, HearingProfile.serializer())
+    } else {
+      val migrated = saved.map { app.openhearing.dsp.dsp.migrateV1Preset(it, UUID.randomUUID().toString(), builtin = false) } +
+          builtins.filter { it.name != "自定义" }.map { app.openhearing.dsp.dsp.migrateV1Preset(it, UUID.randomUUID().toString(), builtin = true) }
+      profileStore.writeText(json.encodeToString(kotlinx.serialization.builtins.ListSerializer(HearingProfile.serializer()), migrated))
+      migrated
+    }
+    _state.update { it.copy(presets = builtins + saved, records = records, profiles = profiles) }
   }
 
   private fun persistPresets(all: List<PresetFile>) {
@@ -701,10 +803,12 @@ class EngineController(context: Context) {
     return all.map { "${it.id}:${it.type}:${it.isSource}:${it.isSink}" }.toSet()
   }
 
-  private fun buildWarnings(gains: GainSetting, diag: Diag, preferUnprocessed: Boolean): List<String> {
+  private fun buildWarnings(gains: GainSetting, diag: Diag, preferUnprocessed: Boolean, stale: String = ""): List<String> {
     val out = mutableListOf<String>()
     out += "个人音频实验，不是医疗器械，不能替代助听器。"
     out += "dBFS 不能换算耳机里的声压级。正增益可能损伤听力或引起啸叫。"
+    out += "立体声双麦不是真实的双耳空间信息。"
+    if (stale.isNotBlank()) out += stale
     if (hasPositiveGain(gains)) out += "当前有正增益。"
     if (diag.inputChannels == 1 || diag.monoCopied) out += "输入是单声道复制到左右，没有双耳空间信息。"
     if (diag.outputChannels == 1 && diag.running) out += "输出是单声道。"
@@ -719,7 +823,616 @@ class EngineController(context: Context) {
     val kind = routeKind(type)
     val label = typeLabel(type)
     val raw = productName?.toString().orEmpty().ifBlank { "未命名" }
-    return AudioDev(id, raw, type, label, kind, input)
+    val counts = channelCounts?.toList().orEmpty()
+    val addr = address ?: ""
+    return AudioDev(id, raw, type, label, kind, input, counts, addr, raw)
+  }
+
+  fun listedInputs() = _state.value.inputs.map {
+    app.openhearing.dsp.dsp.ListedDevice(it.id, it.type, it.channelCounts, it.address, it.productName, it.input)
+  }
+
+  fun resolveInput(cur: AppState): InputChoice {
+    val listed = cur.inputs.map {
+      app.openhearing.dsp.dsp.ListedDevice(it.id, it.type, it.channelCounts.ifEmpty { listOf(1) }, it.address, it.productName, true)
+    }
+    if (cur.manualInputOverride) {
+      val dev = listed.firstOrNull { it.id == cur.selectedInput }
+          ?: return InputChoice.Unavailable("手动指定的输入不在列表里。没有改用其他麦克风。")
+      val channels = if (cur.inputMode == MicInputMode.TopMic) 1 else maxOf(1, dev.channelCounts.maxOrNull() ?: 1)
+      return InputChoice.Ready(dev, channels, app.openhearing.dsp.dsp.identityOf(dev, channels), false)
+    }
+    return app.openhearing.dsp.dsp.selectBuiltin(listed, cur.inputMode, null)
+  }
+
+  fun setInputMode(mode: MicInputMode) {
+    _state.update {
+      it.copy(
+          inputMode = mode,
+          calibrationWarning = "切换了内置麦克风模式。当前麦克风校准和拟合可能失效，需要重新测量或重新校准。",
+          presetStale = true,
+          staleReason = "输入模式已改变。",
+      )
+    }
+    updateDsp(_state.value.dsp.copy(inputMode = mode.ordinal))
+  }
+
+  fun setChannelSwap(on: Boolean) {
+    _state.update {
+      it.copy(
+          channelSwap = on,
+          calibrationWarning = "左右互换只改变路由，不生成新的校准。预设会记下互换状态。",
+          presetStale = true,
+          staleReason = "左右互换已改变。",
+      )
+    }
+    updateDsp(_state.value.dsp.copy(channelSwap = on))
+  }
+
+  fun setTopChannel(channel: Int) {
+    _state.update { it.copy(topChannel = channel.coerceIn(-1, 1)) }
+    updateDsp(_state.value.dsp.copy(topChannel = channel.coerceIn(-1, 1)))
+  }
+
+  fun pinOutput(on: Boolean) {
+    _state.update {
+      it.copy(
+          outputPinned = on,
+          staleReason = if (on) "输出被手动指定，不再跟随系统默认路由。" else it.staleReason,
+          presetStale = on || it.presetStale,
+      )
+    }
+  }
+
+  fun setManualInputOverride(on: Boolean) {
+    _state.update {
+      it.copy(
+          manualInputOverride = on,
+          calibrationWarning = if (on) "手动选择了非默认输入。麦克风校准失效，需要重新测量。" else it.calibrationWarning,
+          presetStale = on || it.presetStale,
+          staleReason = if (on) "输入被手动覆盖。" else it.staleReason,
+      )
+    }
+  }
+
+  fun setHowling(on: Boolean) = updateDsp(_state.value.dsp.copy(howlingDetect = on))
+  fun setNoiseControl(on: Boolean) = updateDsp(_state.value.dsp.copy(noiseFloorControl = on))
+  fun setSpectral(on: Boolean) {
+    updateDsp(_state.value.dsp.copy(spectralNr = on))
+    _state.update {
+      it.copy(profileMessage = if (on) "频谱降噪已打开。算法延迟约 5.33 ms（48 kHz，256 点），真机端到端还没测，不能说仍满足 10–20 ms。" else "频谱降噪已关闭。")
+    }
+  }
+
+  fun setMicCalMode(mode: Int) {
+    val origin = when (mode) {
+      1 -> "主观匹配"
+      2 -> "参考麦克风相对校准"
+      else -> "未校准默认"
+    }
+    updateDsp(_state.value.dsp.copy(micCalMode = mode.coerceIn(0, 2)))
+    _state.update { it.copy(profileMessage = "麦克风校准档：$origin。未校准不会套用修正曲线。") }
+  }
+
+  fun acknowledgeStale() {
+    _state.update { it.copy(presetStale = false, status = "已确认音量或设备变化。预设仍可能失效，增益不会自动回到高档。") }
+  }
+
+  fun confirmHeadphone() {
+    _state.update { it.copy(headphoneConfirmed = true, profileMessage = "已确认当前耳机。仍从低增益启动，需要再点恢复预设增益。") }
+  }
+
+  fun releaseSafeStart() {
+    val full = _state.value.pendingFullDsp ?: return
+    if (!_state.value.headphoneConfirmed) {
+      _state.update { it.copy(profileMessage = "先确认耳机，再恢复预设增益。") }
+      return
+    }
+    updateDsp(full.copy(measurementMode = false))
+    _state.update { it.copy(safeStart = false, pendingFullDsp = null, profileMessage = "已恢复预设增益，变化是平滑的。") }
+  }
+
+  fun profiles(): List<HearingProfile> = _state.value.profiles
+
+  fun saveCurrentProfile(name: String, headphone: String) {
+    val clean = name.trim()
+    if (clean.isEmpty() || clean.length > 40) {
+      _state.update { it.copy(profileMessage = "预设名需要 1 到 40 个字") }
+      return
+    }
+    validateConfig(_state.value.dsp)?.let {
+      _state.update { st -> st.copy(profileMessage = it) }
+      return
+    }
+    val cur = _state.value
+    val profile = HearingProfile(
+        id = UUID.randomUUID().toString(),
+        profileName = clean,
+        headphone = app.openhearing.dsp.dsp.HeadphoneInfo(userDefinedName = headphone.ifBlank { clean }, dacLabel = "JM6PRO2", systemVolumeAtTest = cur.mediaVolume),
+        deviceCondition = app.openhearing.dsp.dsp.DeviceCondition(
+            mediaVolume = cur.mediaVolume,
+            absoluteVolume = cur.volumeFixed,
+            input = app.openhearing.dsp.dsp.InputCondition(
+                mode = cur.inputMode.wire,
+                channelSwap = cur.channelSwap,
+                channelCount = if (cur.inputMode == MicInputMode.TopMic) 1 else 2,
+                deviceId = cur.diag.inputDeviceId.takeIf { it > 0 },
+                manualOverride = cur.manualInputOverride,
+                mappingUnverified = cur.topChannel < 0 && cur.inputMode == MicInputMode.StereoDual,
+            ),
+            output = app.openhearing.dsp.dsp.OutputCondition(policy = if (cur.outputPinned) "manual" else "follow-system", deviceId = cur.diag.outputDeviceId.takeIf { it > 0 }),
+        ),
+        micCalibrationRef = app.openhearing.dsp.dsp.MicCalRef(
+            mode = when (cur.dsp.micCalMode) { 1 -> "subjective"; 2 -> "reference"; else -> "uncalibrated" },
+            origin = when (cur.dsp.micCalMode) { 1 -> "主观匹配"; 2 -> "参考麦克风相对校准"; else -> "未校准默认" },
+            inputMode = cur.inputMode.wire,
+        ),
+        dsp = cur.dsp.copy(measurementMode = false),
+        autoDsp = cur.pendingFullDsp?.copy(measurementMode = false),
+        measurements = measurementBundle(cur.measurement),
+        algorithm = app.openhearing.dsp.dsp.AlgorithmInfo(),
+        parameterProvenance = cur.fitLines.map {
+          app.openhearing.dsp.dsp.ProvenanceEntry("见拟合", "见拟合", "摘要", it, "工程默认")
+        } + listOf(
+            app.openhearing.dsp.dsp.ProvenanceEntry("左", "基础音量", "Gain", "%.0f dB".format(cur.measurement.baseline.leftDb), "手动修改", note = "测听前的整体响度，不是临床验配"),
+            app.openhearing.dsp.dsp.ProvenanceEntry("右", "基础音量", "Gain", "%.0f dB".format(cur.measurement.baseline.rightDb), "手动修改", note = "测听前的整体响度，不是临床验配"),
+        ),
+        createdAt = java.time.Instant.now().toString(),
+        manualEdit = cur.fitLines.isEmpty(),
+    )
+    app.openhearing.dsp.dsp.validateProfile(profile)?.let {
+      _state.update { st -> st.copy(profileMessage = it) }
+      return
+    }
+    persistProfiles(cur.profiles + profile)
+    _state.update { it.copy(activeProfileId = profile.id, profileMessage = "已保存「$clean」。不同耳机不默认通用。") }
+  }
+
+  fun loadProfile(id: String) {
+    val profile = _state.value.profiles.firstOrNull { it.id == id } ?: return
+    app.openhearing.dsp.dsp.validateProfile(profile)?.let {
+      _state.update { st -> st.copy(profileMessage = it) }
+      return
+    }
+    val safe = app.openhearing.dsp.dsp.safeStartConfig(profile.dsp)
+    updateDsp(safe)
+    _state.update {
+      it.copy(
+          activeProfileId = id,
+          pendingFullDsp = profile.dsp,
+          safeStart = true,
+          headphoneConfirmed = false,
+          profileMessage = "已载入「${profile.profileName}」，增益先降到不超过 0 dB。请确认耳机后再恢复。",
+          calibrationWarning = if (profile.deviceCondition.input.mappingUnverified) "这份预设的左右声道映射还没在这台手机上核对。" else "",
+      )
+    }
+  }
+
+  fun copyProfile(id: String) {
+    val profile = _state.value.profiles.firstOrNull { it.id == id } ?: return
+    val copy = profile.copy(id = UUID.randomUUID().toString(), profileName = (profile.profileName + " 副本").take(40), parentId = profile.id, version = profile.version + 1)
+    persistProfiles(_state.value.profiles + copy)
+    _state.update { it.copy(profileMessage = "已复制。") }
+  }
+
+  fun deleteProfile(id: String) {
+    persistProfiles(_state.value.profiles.filterNot { it.id == id })
+    _state.update { it.copy(profileMessage = "已删除。", activeProfileId = if (it.activeProfileId == id) null else it.activeProfileId) }
+  }
+
+  fun saveDerived(name: String) {
+    val cur = _state.value
+    val source = cur.profiles.firstOrNull { it.id == cur.activeProfileId } ?: return
+    val derived = app.openhearing.dsp.dsp.derivedProfile(source, name, UUID.randomUUID().toString(), cur.dsp)
+    persistProfiles(cur.profiles + derived)
+    _state.update { it.copy(activeProfileId = derived.id, profileMessage = "已另存派生版本，没有覆盖原来的自动结果。") }
+  }
+
+  fun exportProfiles(confirmed: Boolean): String {
+    val gate = app.openhearing.dsp.dsp.exportProfiles(_state.value.profiles, confirmed, json)
+    return when (gate) {
+      is app.openhearing.dsp.dsp.ExportGate.Blocked -> gate.warning
+      is app.openhearing.dsp.dsp.ExportGate.Allowed -> gate.json
+    }
+  }
+
+  fun importProfiles(text: String, confirmed: Boolean): String {
+    val parsed = app.openhearing.dsp.dsp.importProfiles(text, confirmed, json)
+    parsed.exceptionOrNull()?.let { return it.message ?: "导入失败" }
+    val next = _state.value.profiles + parsed.getOrThrow()
+    persistProfiles(next)
+    return "ok"
+  }
+
+  fun beginMeasurement() {
+    if (MeasurementPolicy.sessionExhausted(_state.value.measurement.exposureSec)) {
+      _state.update { it.copy(profileMessage = "这次测量已经到 ${MeasurementPolicy.SESSION_LIMIT_SEC / 60} 分钟，先休息。") }
+      return
+    }
+    updateDsp(_state.value.dsp.copy(measurementMode = true, measurementCeilingDb = MeasurementPolicy.MEASUREMENT_CEILING_DB, inputDb = 0f, outputDb = 0f, leftDb = 0f, rightDb = 0f, howlingDetect = false))
+    val fresh = MeasurementUi()
+    _state.update {
+      it.copy(
+          measurementRunning = true,
+          measurement = fresh.copy(stimulusOn = true),
+          profileMessage = "先调基础音量。这一步可以改系统音量，均衡测试开始后音量键会锁住。测量上限 ${MeasurementPolicy.MEASUREMENT_CEILING_DB.toInt()} dBFS。",
+      )
+    }
+    playBaseline(0)
+  }
+
+  fun stopMeasurement() {
+    if (_state.value.nativeLoaded) bridge.nativeSetStimulus(0, 0f, 0f, 0, 1)
+    val ui = _state.value.measurement
+    updateDsp(_state.value.dsp.copy(measurementMode = false))
+    _state.update {
+      it.copy(
+          measurementRunning = false,
+          measurement = ui.copy(
+              stimulusOn = false,
+              awaiting = false,
+              aborted = !ui.finished,
+              savePrompt = false,
+              message = "测量已停止。没做完的这一轮不会当成一份完整预设。",
+          ),
+      )
+    }
+  }
+
+  private fun playBaseline(ear: Int) {
+    if (!_state.value.nativeLoaded) return
+    bridge.nativeSetStimulus(1, 1000f, BaselinePolicy.START_AMPLITUDE, if (ear == 0) 1 else 2, 2)
+  }
+
+  private fun stopStimulus() {
+    if (_state.value.nativeLoaded) bridge.nativeSetStimulus(0, 0f, 0f, 0, 1)
+  }
+
+  fun baselineAdjust(action: BaselineAction) {
+    val ui = _state.value.measurement
+    if (!_state.value.measurementRunning || ui.aborted) return
+    if (ui.stage != MeasureStage.Baseline && ui.stage != MeasureStage.Blocked && action != BaselineAction.Retry) return
+    val systemMax = try {
+      audio.getStreamVolume(AudioManager.STREAM_MUSIC) >= audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+    } catch (_: Throwable) {
+      false
+    }
+    val next = applyBaseline(ui.baseline, action, systemMax)
+    val note = when {
+      next.needSystemVolume && audio.isVolumeFixed ->
+        "应用增益已经到测量允许的最大 +${BaselinePolicy.MAX_DB.toInt()} dB，声音还是不够。这路 USB 开了绝对音量，手机媒体音量可能带动不了 DAC。请用 JM6PRO2 上的音量，也可以试下面的系统音量按钮。调好后点「重试这一耳」。后面的均衡和动态测试先不做。"
+      next.needSystemVolume && next.systemAlsoMax ->
+        "系统媒体音量和应用增益都到顶了，仍然不够响。后面的均衡和动态测试先不做。可以先把 DAC 音量调大，再点「重试这一耳」。安全限幅没有关掉。"
+      next.needSystemVolume ->
+        "应用增益已经到 +${BaselinePolicy.MAX_DB.toInt()} dB，声音还是不够。请用下面的按钮调大系统媒体音量，然后重试这一耳。后面的测试先停在这里。"
+      next.stage == MeasureStage.Frequencies ->
+        "左右耳的基础音量都记下了。接下来是各频率的响度，音量键会重新锁住，避免中途改条件。"
+      next.ear == 1 && action == BaselineAction.Confirm ->
+        "左耳基础音量是 ${"%.0f".format(next.leftDb)} dB。现在听右耳的粉噪声，调到舒服再确认。"
+      else -> if (next.ear == 0) "左耳粉噪声，当前 ${"%.0f".format(next.gainDb)} dB。" else "右耳粉噪声，当前 ${"%.0f".format(next.gainDb)} dB。"
+    }
+    updateDsp(
+        _state.value.dsp.copy(
+            measurementMode = true,
+            measurementCeilingDb = MeasurementPolicy.MEASUREMENT_CEILING_DB,
+            leftDb = next.leftDb,
+            rightDb = next.rightDb,
+            outputDb = 0f,
+            howlingDetect = false,
+        ),
+    )
+    when {
+      next.stage == MeasureStage.Baseline && !next.needSystemVolume -> playBaseline(next.ear)
+      else -> stopStimulus()
+    }
+    _state.update {
+      it.copy(
+          measurement = ui.copy(
+              stage = next.stage,
+              baseline = next,
+              ear = next.ear,
+              stimulusOn = next.stage == MeasureStage.Baseline && !next.needSystemVolume,
+              message = note,
+              volumeNote = if (next.needSystemVolume) note else "",
+          ),
+      )
+    }
+  }
+
+  fun adjustSystemVolume(up: Boolean): String {
+    val fixed = audio.isVolumeFixed
+    val direction = if (up) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER
+    audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI)
+    val vol = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
+    val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+    observedVolume = vol
+    observedFixed = fixed
+    val moved = when {
+      fixed -> "已尝试调节。USB 绝对音量开着时，耳机响度可能要靠 DAC 自己的音量。"
+      up && vol >= max -> "系统媒体音量已经到最大。"
+      else -> "系统媒体音量已调到 $vol / $max。监听没有因此停止。"
+    }
+    _state.update { it.copy(mediaVolume = vol, volumeFixed = fixed, measurement = it.measurement.copy(volumeNote = moved)) }
+    return moved
+  }
+
+  fun presentStimulus() {
+    val ui = _state.value.measurement
+    if (!_state.value.measurementRunning || ui.finished || ui.stoppedForSafety || !canRunFrequencyTests(ui.baseline)) return
+    if (MeasurementPolicy.sessionExhausted(ui.exposureSec)) {
+      _state.update { it.copy(measurement = ui.copy(message = MeasurementPolicy.REST_HINT, stimulusOn = false)) }
+      return
+    }
+    val bands = FloatArray(6)
+    val outBands = FloatArray(6)
+    if (_state.value.nativeLoaded && _state.value.running) {
+      bridge.nativeFillBands(bands, outBands)
+    }
+    val freqIndex = if (!ui.familiarizationDone) 4 else ui.queue.getOrElse(ui.queuePos) { 4 }
+    val freq = MeasurementPolicy.FREQUENCIES_HZ[freqIndex]
+    val level = if (!ui.familiarizationDone) MeasurementPolicy.START_LEVEL_DB else ui.stair.levelDb
+    val sr = _state.value.diag.outputRate.takeIf { it > 8000 } ?: 48000
+    val amp = if (_state.value.nativeLoaded) bridge.nativeStimulusAmp(1, freq, level, sr) else 0.01f
+    if (_state.value.nativeLoaded) bridge.nativeSetStimulus(1, freq, amp, if (ui.ear == 0) 1 else 2, 1)
+    val ambient = bands.getOrElse(app.openhearing.dsp.dsp.bandIndexForHz(freq)) { -80f }
+    _state.update {
+      it.copy(
+          measurement = ui.copy(
+              freqIndex = freqIndex,
+              awaiting = true,
+              stimulusOn = true,
+              lastAmbient = ambient,
+              ambientMeasured = _state.value.running,
+              message = "请判断这一下。${MeasurementPolicy.FREQUENCIES_HZ[freqIndex].toInt()} Hz，请求电平 ${level.toInt()} dBFS（频段 RMS）。单次会话建议不超过 ${MeasurementPolicy.SESSION_LIMIT_SEC / 60} 分钟。",
+          ),
+      )
+    }
+  }
+
+  fun rateStimulus(rating: Int, reactionMs: Long) {
+    val ui = _state.value.measurement
+    if (!ui.awaiting) return
+    if (_state.value.nativeLoaded) bridge.nativeSetStimulus(0, 0f, 0f, 0, 1)
+    val catch = ui.familiarizationDone && MeasurementPolicy.isCatchTrial(ui.presentation)
+    val ambientBad = MeasurementPolicy.ambientUnreliable(ui.lastAmbient, ui.stair.levelDb, ui.ambientMeasured)
+    val reliable = trialIsReliable(catch, ambientBad, reactionMs, !ui.familiarizationDone)
+    val trial = app.openhearing.dsp.dsp.TrialRecord(
+        ear = ui.ear,
+        freqIndex = ui.freqIndex,
+        levelDb = if (ui.familiarizationDone) ui.stair.levelDb else MeasurementPolicy.START_LEVEL_DB,
+        rating = rating.coerceIn(0, 6),
+        catchTrial = catch,
+        reliable = reliable,
+        ambientBad = ambientBad,
+        reactionMs = reactionMs,
+        familiarization = !ui.familiarizationDone,
+    )
+    if (!ui.familiarizationDone) {
+      _state.update {
+        it.copy(measurement = ui.copy(familiarizationDone = true, awaiting = false, stimulusOn = false, trials = ui.trials + trial, message = "熟悉结束。接下来会计入听阈。空白试次不会标明。"))
+      }
+      return
+    }
+    var falseAlarms = ui.falseAlarms
+    var catchCount = ui.catchCount
+    var stair = ui.stair
+    var queuePos = ui.queuePos
+    var ear = ui.ear
+    var finished = false
+    var message = "已记下。"
+    if (catch) {
+      catchCount += 1
+      if (rating >= 1) falseAlarms += 1
+      message = "已记下这一下。"
+    } else {
+      stair = stepStair(ui.stair, rating)
+      if (stair.done) {
+        queuePos += 1
+        val capped = stair.hitCeiling
+        if (queuePos >= ui.queue.size) {
+          if (ear == 0) {
+            ear = 1
+            queuePos = 0
+            stair = Stair()
+            message = "左耳这一轮结束。换右耳。单耳舒适响度在双耳同时听时往往会更响，后面还有平衡确认。"
+          } else {
+            finished = true
+            message = "两耳测量结束。可以拟合。对侧掩蔽没有做，不能说已经排除交叉听力。"
+          }
+        } else {
+          stair = Stair()
+          message = if (capped) "测量上限到了，这一频没有可靠听阈。" else "下一频。"
+        }
+      }
+    }
+    val crossed = finished && crossFromTrials(ui.trials + trial)
+    _state.update {
+      it.copy(
+          measurement = ui.copy(
+              trials = ui.trials + trial,
+              awaiting = false,
+              stimulusOn = false,
+              presentation = ui.presentation + 1,
+              falseAlarms = falseAlarms,
+              catchCount = catchCount,
+              stair = if (finished) ui.stair else stair,
+              queuePos = queuePos,
+              ear = ear,
+              finished = finished,
+              stage = if (finished) MeasureStage.Done else ui.stage,
+              message = if (ambientBad) "$message 环境噪声超标或没测到，这一试次标为不可靠。" else message,
+              stoppedForSafety = crossed || ui.pain || ui.sudden,
+          ),
+      )
+    }
+    val after = _state.value.measurement
+    if (after.finished && !after.stoppedForSafety && !after.aborted && canRunFrequencyTests(after.baseline.copy(stage = MeasureStage.Frequencies))) {
+      runFit()
+    }
+  }
+
+  fun reportPain() {
+    _state.update { it.copy(measurement = it.measurement.copy(pain = true, stoppedForSafety = true, message = "已停止自动补偿。如果耳鸣或耳痛持续，请做专业检查。这不是诊断。")) }
+    stopMeasurement()
+  }
+
+  fun reportSudden() {
+    _state.update { it.copy(measurement = it.measurement.copy(sudden = true, stoppedForSafety = true, message = "听到突发变化。已停止自动补偿，并建议做专业检查。")) }
+    stopMeasurement()
+  }
+
+  fun setBinauralTrim(balance: Float, overall: Float) {
+    _state.update { it.copy(measurement = it.measurement.copy(balanceDb = balance.coerceIn(-6f, 6f), overallTrimDb = overall.coerceIn(-6f, 6f))) }
+  }
+
+  fun confirmBinaural() {
+    val ui = _state.value.measurement
+    val dsp = _state.value.dsp.copy(leftDb = ui.balanceDb, rightDb = -ui.balanceDb, outputDb = (_state.value.dsp.outputDb + ui.overallTrimDb).coerceIn(-24f, 0f))
+    updateDsp(dsp)
+    _state.update {
+      it.copy(
+          measurement = ui.copy(binauralConfirmed = true, message = "双耳平衡已记成派生调整，没有覆盖单耳原始试次。这不创造空间信息。"),
+          fitLines = it.fitLines + "双耳确认：平衡 ${ui.balanceDb} dB，总响度 ${ui.overallTrimDb} dB，来源 手动修改",
+      )
+    }
+  }
+
+  fun runFit() {
+    val ui = _state.value.measurement
+    if (ui.pain || ui.sudden) {
+      _state.update { it.copy(profileMessage = "已经停止自动补偿，不会继续加大增益。") }
+      return
+    }
+    if (!_state.value.nativeLoaded) {
+      _state.update { it.copy(profileMessage = "原生库没加载，不能拟合。不会用另一套公式冒充。") }
+      return
+    }
+    val trials = ui.trials
+    if (trials.isEmpty()) {
+      _state.update { it.copy(profileMessage = "还没有试次。") }
+      return
+    }
+    val packedTrials = FloatArray(trials.size * 6)
+    trials.forEachIndexed { i, t ->
+      packedTrials[i * 6] = t.ear.toFloat()
+      packedTrials[i * 6 + 1] = t.freqIndex.toFloat()
+      packedTrials[i * 6 + 2] = t.levelDb
+      packedTrials[i * 6 + 3] = t.rating.toFloat()
+      packedTrials[i * 6 + 4] = if (t.reliable) 1f else 0f
+      packedTrials[i * 6 + 5] = if (t.ambientBad) 1f else 0f
+    }
+    val catches = ui.catchCount.coerceAtLeast(1)
+    val config = FloatArray(14)
+    config[0] = _state.value.dsp.micCalMode.toFloat()
+    config[1] = if (_state.value.dsp.feedbackMarginValid) 1f else 0f
+    config[2] = _state.value.dsp.feedbackMarginDb
+    config[3] = if (ui.pain) 1f else 0f
+    config[4] = if (ui.sudden) 1f else 0f
+    config[5] = ui.falseAlarms.toFloat() / catches
+    config[6] = if (_state.value.dsp.noiseFloorControl) 1f else 0f
+    config[7] = _state.value.dsp.noiseMarginDb
+    for (i in 0 until 6) config[8 + i] = _state.value.dsp.noiseFloorDb.getOrElse(i) { -80f }
+    val out = FloatArray(FitLayout.PACKED)
+    val code = bridge.nativeFit(packedTrials, config, out)
+    if (code != 0) {
+      _state.update { it.copy(profileMessage = "拟合被拒绝（$code）。没有改用别的模型。") }
+      return
+    }
+    val dsp = FitLayout.dspFromPacked(out, _state.value.dsp) ?: run {
+      _state.update { it.copy(profileMessage = "拟合结果版本不对。") }
+      return
+    }
+    val lines = FitLayout.provenanceFromPacked(out).map { "${it.ear} ${it.band} ${it.parameter} ${it.value} · ${it.origin}" }
+    val cross = out[1] != 0f || crossFromTrials(trials)
+    val stop = out[2] != 0f || ui.pain || ui.sudden || cross
+    val applied = if (stop) app.openhearing.dsp.dsp.safeStartConfig(dsp.copy(graphicDb = List(10) { 0f }, graphicDbR = List(10) { 0f })) else dsp
+    updateDsp(applied.copy(measurementMode = false))
+    _state.update {
+      it.copy(
+          pendingFullDsp = applied,
+          safeStart = true,
+          fitLines = lines + listOf(
+              "电平定义 ${MeasurementPolicy.LEVEL_DEFINITION}",
+              "测试信号 ${MeasurementPolicy.STIMULUS}",
+              "听阈方法 ${MeasurementPolicy.METHOD}",
+              if (cross) "交叉听力警告：两耳差大约达到 40 dB。没有做对侧掩蔽，不能说已经排除。" else "没有记录到大约 40 dB 的两耳差。",
+              "拟合残差最大 ${"%.1f".format(out[6])} dB，最低置信度 ${"%.2f".format(out[7])}",
+              "Attack 10 ms、Release 150 ms、Knee 10 dB 是工程默认，不是测听推导。",
+          ),
+          profileMessage = if (stop) "已停止或收紧自动补偿。原始试次还在，这次不弹出保存。" else "拟合完成。请给这次测试起个名字。",
+          measurement = ui.copy(
+              stoppedForSafety = stop || ui.stoppedForSafety,
+              fitReady = !stop,
+              suggestedName = if (!stop) defaultTestPresetName(System.currentTimeMillis()) else ui.suggestedName,
+              savePrompt = shouldOfferSave(
+                  frequenciesFinished = ui.finished,
+                  fitReady = !stop,
+                  aborted = ui.aborted,
+                  baselineBlocked = ui.baseline.needSystemVolume,
+                  safetyStop = stop || ui.stoppedForSafety,
+                  dismissed = ui.saveDismissed,
+              ),
+          ),
+      )
+    }
+  }
+
+  fun dismissSavePrompt() {
+    _state.update {
+      it.copy(
+          measurement = it.measurement.copy(savePrompt = false, saveDismissed = true, message = "先不保存。测量结果还在，可以稍后到「我的预设」里保存当前参数。"),
+      )
+    }
+  }
+
+  fun saveCompletedTest(name: String, headphone: String) {
+    val ui = _state.value.measurement
+    if (!shouldOfferSave(ui.finished, ui.fitReady, ui.aborted, ui.baseline.needSystemVolume, ui.stoppedForSafety, dismissed = false)) {
+      _state.update { it.copy(profileMessage = "这次还不是一份完整测完的预设，没有保存。") }
+      return
+    }
+    saveCurrentProfile(name, headphone)
+    if (_state.value.profileMessage.startsWith("已保存")) {
+      _state.update { it.copy(measurement = it.measurement.copy(savePrompt = false, saveDismissed = true)) }
+    }
+  }
+
+  private fun measurementBundle(ui: app.openhearing.dsp.dsp.MeasurementUi): app.openhearing.dsp.dsp.MeasurementBundle {
+    fun map(ear: Int) = ui.trials.filter { it.ear == ear }.map {
+      app.openhearing.dsp.dsp.RawTrial(
+          ear = if (ear == 0) "left" else "right",
+          frequencyHz = MeasurementPolicy.FREQUENCIES_HZ.getOrElse(it.freqIndex) { 0f },
+          levelDb = it.levelDb,
+          rating = it.rating,
+          reliable = it.reliable,
+          catchTrial = it.catchTrial,
+          reactionMs = it.reactionMs,
+          ambientBad = it.ambientBad,
+          familiarization = it.familiarization,
+      )
+    }
+    return app.openhearing.dsp.dsp.MeasurementBundle(
+        stimulusType = MeasurementPolicy.STIMULUS,
+        thresholdMethod = MeasurementPolicy.METHOD,
+        exposureSec = ui.exposureSec,
+        crossHearingWarning = ui.stoppedForSafety,
+        left = map(0),
+        right = map(1),
+    )
+  }
+
+  private fun crossFromTrials(trials: List<app.openhearing.dsp.dsp.TrialRecord>): Boolean {
+    for (freq in 0 until 11) {
+      val left = trials.filter { it.ear == 0 && it.freqIndex == freq && it.reliable && it.rating >= 1 }.minOfOrNull { it.levelDb }
+      val right = trials.filter { it.ear == 1 && it.freqIndex == freq && it.reliable && it.rating >= 1 }.minOfOrNull { it.levelDb }
+      if (MeasurementPolicy.crossHearing(left, right)) return true
+    }
+    return false
+  }
+
+  private fun persistProfiles(all: List<HearingProfile>) {
+    profileStore.writeText(json.encodeToString(kotlinx.serialization.builtins.ListSerializer(HearingProfile.serializer()), all))
+    _state.update { it.copy(profiles = all) }
   }
 }
 

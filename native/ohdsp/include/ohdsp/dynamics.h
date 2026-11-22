@@ -6,6 +6,7 @@
 
 #include "ohdsp/compressor.h"
 #include "ohdsp/crossover.h"
+#include "ohdsp/noise_floor.h"
 
 namespace ohdsp {
 
@@ -43,7 +44,9 @@ class DynamicsBank {
 
   float gainReductionDb() const { return gr_; }
 
-  void process(float& l, float& r, const Params& p) {
+  // sidechainRms is per-band linear RMS of the pre-EQ signal, or nullptr.
+  // It is used only for bands with detectRms set. The V1 peak path ignores it.
+  void process(float& l, float& r, const Params& p, const float* sidechainRms = nullptr) {
     ensureCrossover(p);
     single_.set(p.single);
     const float dryL = l;
@@ -66,7 +69,24 @@ class DynamicsBank {
       multi_[i].set(p.multi[i]);
       float bl = bandsL[i];
       float br = bandsR[i];
-      multi_[i].process(bl, br);
+      if (p.multi[i].detectRms && sidechainRms != nullptr) {
+        float sense = sidechainRms[i];
+        if (p.noiseFloorControl) {
+          const float levelDb = linToDb(sense);
+          const float st = staticCompressorDb(levelDb, p.multi[i].thresholdDb, p.multi[i].ratio, p.multi[i].kneeDb);
+          const float requested = p.multi[i].bypass ? 0.f : st + p.multi[i].makeupDb - levelDb;
+          const float allowed = noiseLimitedBoostDb(levelDb, p.noiseFloorDb[i], p.noiseMarginDb, requested);
+          CompBand capped = p.multi[i];
+          if (allowed + 0.05f < requested) {
+            const float st = staticCompressorDb(levelDb, capped.thresholdDb, capped.ratio, capped.kneeDb);
+            capped.makeupDb = allowed - (st - levelDb);
+          }
+          multi_[i].set(capped);
+        }
+        multi_[i].processWithLevel(bl, br, sense);
+      } else {
+        multi_[i].process(bl, br);
+      }
       multiGr = std::max(multiGr, multi_[i].gainReductionDb());
       sumL += bl;
       sumR += br;

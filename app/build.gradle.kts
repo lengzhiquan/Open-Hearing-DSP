@@ -12,8 +12,8 @@ android {
     applicationId = "app.openhearing.dsp"
     minSdk = 29
     targetSdk = 36
-    versionCode = 1
-    versionName = "0.4.0"
+    versionCode = 3
+    versionName = "2.1.3"
     ndk {
       abiFilters += listOf("arm64-v8a")
     }
