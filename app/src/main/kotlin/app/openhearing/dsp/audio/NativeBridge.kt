@@ -18,7 +18,7 @@ internal class NativeBridge {
   external fun nativeAttemptLog(): String
   external fun nativeStopReason(): String
   external fun nativeFillDiag(ints: IntArray, floats: FloatArray, longs: LongArray)
-  external fun nativeSetStimulus(enabled: Int, freqHz: Float, amplitude: Float, ear: Int)
+  external fun nativeSetStimulus(enabled: Int, freqHz: Float, amplitude: Float, ear: Int, kind: Int)
   external fun nativeStimulusAmp(kind: Int, freqHz: Float, targetDb: Float, sampleRate: Int): Float
   external fun nativeFillBands(inDb: FloatArray, outDb: FloatArray)
   external fun nativeFit(trials: FloatArray, config: FloatArray, out: FloatArray): Int

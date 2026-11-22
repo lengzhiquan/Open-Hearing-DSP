@@ -62,6 +62,10 @@ class AppVm(app: Application) : AndroidViewModel(app) {
   fun exportProfiles(confirmed: Boolean) = controller.exportProfiles(confirmed)
   fun importProfiles(text: String, confirmed: Boolean) = controller.importProfiles(text, confirmed)
   fun beginMeasurement() = controller.beginMeasurement()
+  fun baseline(action: app.openhearing.dsp.dsp.BaselineAction) = controller.baselineAdjust(action)
+  fun adjustSystemVolume(up: Boolean) = controller.adjustSystemVolume(up)
+  fun dismissSavePrompt() = controller.dismissSavePrompt()
+  fun saveCompletedTest(name: String, headphone: String) = controller.saveCompletedTest(name, headphone)
   fun stopMeasurement() = controller.stopMeasurement()
   fun presentStimulus() = controller.presentStimulus()
   fun rateStimulus(rating: Int, reactionMs: Long) = controller.rateStimulus(rating, reactionMs)
@@ -70,5 +74,8 @@ class AppVm(app: Application) : AndroidViewModel(app) {
   fun setBinaural(balance: Float, overall: Float) = controller.setBinauralTrim(balance, overall)
   fun confirmBinaural() = controller.confirmBinaural()
   fun runFit() = controller.runFit()
-  fun measurementLocksKeys(): Boolean = state.value.measurementRunning && app.openhearing.dsp.dsp.MeasurementPolicy.locksVolumeKeys()
+  fun measurementLocksKeys(): Boolean {
+    val cur = state.value
+    return cur.measurementRunning && app.openhearing.dsp.dsp.locksVolumeDuring(cur.measurement.stage)
+  }
 }

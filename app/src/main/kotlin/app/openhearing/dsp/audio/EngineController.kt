@@ -28,7 +28,15 @@ import app.openhearing.dsp.dsp.Stair
 import app.openhearing.dsp.dsp.bandIndexForHz
 import app.openhearing.dsp.dsp.stepStair
 import app.openhearing.dsp.dsp.trialIsReliable
+import app.openhearing.dsp.dsp.BaselineAction
+import app.openhearing.dsp.dsp.BaselinePolicy
+import app.openhearing.dsp.dsp.MeasureStage
 import app.openhearing.dsp.dsp.VolumeWatch
+import app.openhearing.dsp.dsp.applyBaseline
+import app.openhearing.dsp.dsp.canRunFrequencyTests
+import app.openhearing.dsp.dsp.defaultTestPresetName
+import app.openhearing.dsp.dsp.locksVolumeDuring
+import app.openhearing.dsp.dsp.shouldOfferSave
 import app.openhearing.dsp.dsp.watchMediaVolume
 import app.openhearing.dsp.dsp.SessionRecord
 import app.openhearing.dsp.dsp.flatConfig
@@ -205,7 +213,7 @@ class EngineController(context: Context) {
               VolumeWatch.StaleMute -> {
                 stale = true
                 staleReason = "媒体音量或 USB 绝对音量状态变了。当前预设可能失效，请复核或重新测量。高增益已静音。"
-                if (running && !diag.stopRequested) bridge.nativeSetUserWantsAudible(false)
+                if (running && !diag.stopRequested && !current.measurementRunning) bridge.nativeSetUserWantsAudible(false)
               }
               VolumeWatch.FirstSample, VolumeWatch.Unchanged -> Unit
             }
@@ -959,12 +967,16 @@ class EngineController(context: Context) {
             origin = when (cur.dsp.micCalMode) { 1 -> "主观匹配"; 2 -> "参考麦克风相对校准"; else -> "未校准默认" },
             inputMode = cur.inputMode.wire,
         ),
-        dsp = cur.dsp,
-        autoDsp = cur.pendingFullDsp,
+        dsp = cur.dsp.copy(measurementMode = false),
+        autoDsp = cur.pendingFullDsp?.copy(measurementMode = false),
+        measurements = measurementBundle(cur.measurement),
         algorithm = app.openhearing.dsp.dsp.AlgorithmInfo(),
         parameterProvenance = cur.fitLines.map {
           app.openhearing.dsp.dsp.ProvenanceEntry("见拟合", "见拟合", "摘要", it, "工程默认")
-        },
+        } + listOf(
+            app.openhearing.dsp.dsp.ProvenanceEntry("左", "基础音量", "Gain", "%.0f dB".format(cur.measurement.baseline.leftDb), "手动修改", note = "测听前的整体响度，不是临床验配"),
+            app.openhearing.dsp.dsp.ProvenanceEntry("右", "基础音量", "Gain", "%.0f dB".format(cur.measurement.baseline.rightDb), "手动修改", note = "测听前的整体响度，不是临床验配"),
+        ),
         createdAt = java.time.Instant.now().toString(),
         manualEdit = cur.fitLines.isEmpty(),
     )
@@ -1037,25 +1049,116 @@ class EngineController(context: Context) {
       _state.update { it.copy(profileMessage = "这次测量已经到 ${MeasurementPolicy.SESSION_LIMIT_SEC / 60} 分钟，先休息。") }
       return
     }
-    updateDsp(_state.value.dsp.copy(measurementMode = true, measurementCeilingDb = MeasurementPolicy.MEASUREMENT_CEILING_DB, inputDb = 0f, outputDb = 0f, howlingDetect = false))
+    updateDsp(_state.value.dsp.copy(measurementMode = true, measurementCeilingDb = MeasurementPolicy.MEASUREMENT_CEILING_DB, inputDb = 0f, outputDb = 0f, leftDb = 0f, rightDb = 0f, howlingDetect = false))
+    val fresh = MeasurementUi()
     _state.update {
       it.copy(
           measurementRunning = true,
-          measurement = MeasurementUi(),
-          profileMessage = "测量输出上限 ${MeasurementPolicy.MEASUREMENT_CEILING_DB.toInt()} dBFS，严于监听的 -1 dBFS。音量键已锁定。",
+          measurement = fresh.copy(stimulusOn = true),
+          profileMessage = "先调基础音量。这一步可以改系统音量，均衡测试开始后音量键会锁住。测量上限 ${MeasurementPolicy.MEASUREMENT_CEILING_DB.toInt()} dBFS。",
+      )
+    }
+    playBaseline(0)
+  }
+
+  fun stopMeasurement() {
+    if (_state.value.nativeLoaded) bridge.nativeSetStimulus(0, 0f, 0f, 0, 1)
+    val ui = _state.value.measurement
+    updateDsp(_state.value.dsp.copy(measurementMode = false))
+    _state.update {
+      it.copy(
+          measurementRunning = false,
+          measurement = ui.copy(
+              stimulusOn = false,
+              awaiting = false,
+              aborted = !ui.finished,
+              savePrompt = false,
+              message = "测量已停止。没做完的这一轮不会当成一份完整预设。",
+          ),
       )
     }
   }
 
-  fun stopMeasurement() {
-    if (_state.value.nativeLoaded) bridge.nativeSetStimulus(0, 0f, 0f, 0)
-    updateDsp(_state.value.dsp.copy(measurementMode = false))
-    _state.update { it.copy(measurementRunning = false, measurement = it.measurement.copy(stimulusOn = false, awaiting = false, message = "测量已停止。")) }
+  private fun playBaseline(ear: Int) {
+    if (!_state.value.nativeLoaded) return
+    bridge.nativeSetStimulus(1, 1000f, BaselinePolicy.START_AMPLITUDE, if (ear == 0) 1 else 2, 2)
+  }
+
+  private fun stopStimulus() {
+    if (_state.value.nativeLoaded) bridge.nativeSetStimulus(0, 0f, 0f, 0, 1)
+  }
+
+  fun baselineAdjust(action: BaselineAction) {
+    val ui = _state.value.measurement
+    if (!_state.value.measurementRunning || ui.aborted) return
+    if (ui.stage != MeasureStage.Baseline && ui.stage != MeasureStage.Blocked && action != BaselineAction.Retry) return
+    val systemMax = try {
+      audio.getStreamVolume(AudioManager.STREAM_MUSIC) >= audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+    } catch (_: Throwable) {
+      false
+    }
+    val next = applyBaseline(ui.baseline, action, systemMax)
+    val note = when {
+      next.needSystemVolume && audio.isVolumeFixed ->
+        "应用增益已经到测量允许的最大 +${BaselinePolicy.MAX_DB.toInt()} dB，声音还是不够。这路 USB 开了绝对音量，手机媒体音量可能带动不了 DAC。请用 JM6PRO2 上的音量，也可以试下面的系统音量按钮。调好后点「重试这一耳」。后面的均衡和动态测试先不做。"
+      next.needSystemVolume && next.systemAlsoMax ->
+        "系统媒体音量和应用增益都到顶了，仍然不够响。后面的均衡和动态测试先不做。可以先把 DAC 音量调大，再点「重试这一耳」。安全限幅没有关掉。"
+      next.needSystemVolume ->
+        "应用增益已经到 +${BaselinePolicy.MAX_DB.toInt()} dB，声音还是不够。请用下面的按钮调大系统媒体音量，然后重试这一耳。后面的测试先停在这里。"
+      next.stage == MeasureStage.Frequencies ->
+        "左右耳的基础音量都记下了。接下来是各频率的响度，音量键会重新锁住，避免中途改条件。"
+      next.ear == 1 && action == BaselineAction.Confirm ->
+        "左耳基础音量是 ${"%.0f".format(next.leftDb)} dB。现在听右耳的粉噪声，调到舒服再确认。"
+      else -> if (next.ear == 0) "左耳粉噪声，当前 ${"%.0f".format(next.gainDb)} dB。" else "右耳粉噪声，当前 ${"%.0f".format(next.gainDb)} dB。"
+    }
+    updateDsp(
+        _state.value.dsp.copy(
+            measurementMode = true,
+            measurementCeilingDb = MeasurementPolicy.MEASUREMENT_CEILING_DB,
+            leftDb = next.leftDb,
+            rightDb = next.rightDb,
+            outputDb = 0f,
+            howlingDetect = false,
+        ),
+    )
+    when {
+      next.stage == MeasureStage.Baseline && !next.needSystemVolume -> playBaseline(next.ear)
+      else -> stopStimulus()
+    }
+    _state.update {
+      it.copy(
+          measurement = ui.copy(
+              stage = next.stage,
+              baseline = next,
+              ear = next.ear,
+              stimulusOn = next.stage == MeasureStage.Baseline && !next.needSystemVolume,
+              message = note,
+              volumeNote = if (next.needSystemVolume) note else "",
+          ),
+      )
+    }
+  }
+
+  fun adjustSystemVolume(up: Boolean): String {
+    val fixed = audio.isVolumeFixed
+    val direction = if (up) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER
+    audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI)
+    val vol = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
+    val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+    observedVolume = vol
+    observedFixed = fixed
+    val moved = when {
+      fixed -> "已尝试调节。USB 绝对音量开着时，耳机响度可能要靠 DAC 自己的音量。"
+      up && vol >= max -> "系统媒体音量已经到最大。"
+      else -> "系统媒体音量已调到 $vol / $max。监听没有因此停止。"
+    }
+    _state.update { it.copy(mediaVolume = vol, volumeFixed = fixed, measurement = it.measurement.copy(volumeNote = moved)) }
+    return moved
   }
 
   fun presentStimulus() {
     val ui = _state.value.measurement
-    if (! _state.value.measurementRunning || ui.finished || ui.stoppedForSafety) return
+    if (!_state.value.measurementRunning || ui.finished || ui.stoppedForSafety || !canRunFrequencyTests(ui.baseline)) return
     if (MeasurementPolicy.sessionExhausted(ui.exposureSec)) {
       _state.update { it.copy(measurement = ui.copy(message = MeasurementPolicy.REST_HINT, stimulusOn = false)) }
       return
@@ -1070,7 +1173,7 @@ class EngineController(context: Context) {
     val level = if (!ui.familiarizationDone) MeasurementPolicy.START_LEVEL_DB else ui.stair.levelDb
     val sr = _state.value.diag.outputRate.takeIf { it > 8000 } ?: 48000
     val amp = if (_state.value.nativeLoaded) bridge.nativeStimulusAmp(1, freq, level, sr) else 0.01f
-    if (_state.value.nativeLoaded) bridge.nativeSetStimulus(1, freq, amp, if (ui.ear == 0) 1 else 2)
+    if (_state.value.nativeLoaded) bridge.nativeSetStimulus(1, freq, amp, if (ui.ear == 0) 1 else 2, 1)
     val ambient = bands.getOrElse(app.openhearing.dsp.dsp.bandIndexForHz(freq)) { -80f }
     _state.update {
       it.copy(
@@ -1089,7 +1192,7 @@ class EngineController(context: Context) {
   fun rateStimulus(rating: Int, reactionMs: Long) {
     val ui = _state.value.measurement
     if (!ui.awaiting) return
-    if (_state.value.nativeLoaded) bridge.nativeSetStimulus(0, 0f, 0f, 0)
+    if (_state.value.nativeLoaded) bridge.nativeSetStimulus(0, 0f, 0f, 0, 1)
     val catch = ui.familiarizationDone && MeasurementPolicy.isCatchTrial(ui.presentation)
     val ambientBad = MeasurementPolicy.ambientUnreliable(ui.lastAmbient, ui.stair.levelDb, ui.ambientMeasured)
     val reliable = trialIsReliable(catch, ambientBad, reactionMs, !ui.familiarizationDone)
@@ -1156,10 +1259,15 @@ class EngineController(context: Context) {
               queuePos = queuePos,
               ear = ear,
               finished = finished,
+              stage = if (finished) MeasureStage.Done else ui.stage,
               message = if (ambientBad) "$message 环境噪声超标或没测到，这一试次标为不可靠。" else message,
               stoppedForSafety = crossed || ui.pain || ui.sudden,
           ),
       )
+    }
+    val after = _state.value.measurement
+    if (after.finished && !after.stoppedForSafety && !after.aborted && canRunFrequencyTests(after.baseline.copy(stage = MeasureStage.Frequencies))) {
+      runFit()
     }
   }
 
@@ -1251,10 +1359,66 @@ class EngineController(context: Context) {
               "拟合残差最大 ${"%.1f".format(out[6])} dB，最低置信度 ${"%.2f".format(out[7])}",
               "Attack 10 ms、Release 150 ms、Knee 10 dB 是工程默认，不是测听推导。",
           ),
-          profileMessage = if (stop) "已停止或收紧自动补偿。原始试次还在。" else "拟合完成。增益先保持在安全启动。",
-          measurement = ui.copy(stoppedForSafety = stop),
+          profileMessage = if (stop) "已停止或收紧自动补偿。原始试次还在，这次不弹出保存。" else "拟合完成。请给这次测试起个名字。",
+          measurement = ui.copy(
+              stoppedForSafety = stop || ui.stoppedForSafety,
+              fitReady = !stop,
+              suggestedName = if (!stop) defaultTestPresetName(System.currentTimeMillis()) else ui.suggestedName,
+              savePrompt = shouldOfferSave(
+                  frequenciesFinished = ui.finished,
+                  fitReady = !stop,
+                  aborted = ui.aborted,
+                  baselineBlocked = ui.baseline.needSystemVolume,
+                  safetyStop = stop || ui.stoppedForSafety,
+                  dismissed = ui.saveDismissed,
+              ),
+          ),
       )
     }
+  }
+
+  fun dismissSavePrompt() {
+    _state.update {
+      it.copy(
+          measurement = it.measurement.copy(savePrompt = false, saveDismissed = true, message = "先不保存。测量结果还在，可以稍后到「我的预设」里保存当前参数。"),
+      )
+    }
+  }
+
+  fun saveCompletedTest(name: String, headphone: String) {
+    val ui = _state.value.measurement
+    if (!shouldOfferSave(ui.finished, ui.fitReady, ui.aborted, ui.baseline.needSystemVolume, ui.stoppedForSafety, dismissed = false)) {
+      _state.update { it.copy(profileMessage = "这次还不是一份完整测完的预设，没有保存。") }
+      return
+    }
+    saveCurrentProfile(name, headphone)
+    if (_state.value.profileMessage.startsWith("已保存")) {
+      _state.update { it.copy(measurement = it.measurement.copy(savePrompt = false, saveDismissed = true)) }
+    }
+  }
+
+  private fun measurementBundle(ui: app.openhearing.dsp.dsp.MeasurementUi): app.openhearing.dsp.dsp.MeasurementBundle {
+    fun map(ear: Int) = ui.trials.filter { it.ear == ear }.map {
+      app.openhearing.dsp.dsp.RawTrial(
+          ear = if (ear == 0) "left" else "right",
+          frequencyHz = MeasurementPolicy.FREQUENCIES_HZ.getOrElse(it.freqIndex) { 0f },
+          levelDb = it.levelDb,
+          rating = it.rating,
+          reliable = it.reliable,
+          catchTrial = it.catchTrial,
+          reactionMs = it.reactionMs,
+          ambientBad = it.ambientBad,
+          familiarization = it.familiarization,
+      )
+    }
+    return app.openhearing.dsp.dsp.MeasurementBundle(
+        stimulusType = MeasurementPolicy.STIMULUS,
+        thresholdMethod = MeasurementPolicy.METHOD,
+        exposureSec = ui.exposureSec,
+        crossHearingWarning = ui.stoppedForSafety,
+        left = map(0),
+        right = map(1),
+    )
   }
 
   private fun crossFromTrials(trials: List<app.openhearing.dsp.dsp.TrialRecord>): Boolean {

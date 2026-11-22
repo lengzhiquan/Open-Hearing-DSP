@@ -75,7 +75,8 @@ class Processor {
 
   // Stimulus is mixed after the microphone path and before the limiters.
   // ear: 0 both, 1 left, 2 right. Amplitude is linear, before the measurement cap.
-  void setStimulus(int enabled, float freqHz, float amplitude, int ear);
+  // kind 1 warble, kind 2 pink noise for overall-loudness baseline. Default stays warble.
+  void setStimulus(int enabled, float freqHz, float amplitude, int ear, int kind = 1);
   void copyBandDb(float* inDb, float* outDb) const;
 
   bool faulted() const { return fault_.load(std::memory_order_acquire) != 0; }
@@ -150,9 +151,14 @@ class Processor {
   float stimAmpCoeff_ = 0.f;
   double stimCarrier_ = 0.0;
   double stimMod_ = 0.0;
+  float pinkB0_ = 0.f;
+  float pinkB1_ = 0.f;
+  float pinkB2_ = 0.f;
+  uint32_t pinkRng_ = 0xA5A5u;
   int measureClips_ = 0;
   std::atomic<int> stimOn_{0};
   std::atomic<int> stimEar_{0};
+  std::atomic<int> stimKind_{1};
   std::atomic<int> stimFreqBits_{0};
   std::atomic<int> stimAmpBits_{0};
   std::atomic<int> pubHowlEvents_{0};

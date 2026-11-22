@@ -133,9 +133,9 @@ extern "C" JNIEXPORT jstring JNICALL Java_app_openhearing_dsp_audio_NativeBridge
 }
 
 extern "C" JNIEXPORT void JNICALL Java_app_openhearing_dsp_audio_NativeBridge_nativeSetStimulus(
-    JNIEnv*, jobject, jint enabled, jfloat freqHz, jfloat amplitude, jint ear) {
+    JNIEnv*, jobject, jint enabled, jfloat freqHz, jfloat amplitude, jint ear, jint kind) {
   std::lock_guard<std::mutex> lock(gCtrl);
-  if (gEngine) gEngine->setStimulus(enabled, freqHz, amplitude, ear);
+  if (gEngine) gEngine->setStimulus(enabled, freqHz, amplitude, ear, kind);
 }
 
 extern "C" JNIEXPORT jfloat JNICALL Java_app_openhearing_dsp_audio_NativeBridge_nativeStimulusAmp(

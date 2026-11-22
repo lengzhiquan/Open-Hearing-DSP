@@ -522,6 +522,33 @@ static void test_route_change_decision() {
   CHECK(ohdsp::decideOutputCallbackDevice(speaker, 0, false, usb) == ohdsp::RouteAction::KeepRunning);
 }
 
+static void test_baseline_noise_follows_ear_gain() {
+  ohdsp::Processor proc;
+  proc.prepare(48000.0, 256);
+  proc.setAudible(true);
+  ohdsp::Params p;
+  p.measurementMode = true;
+  p.measurementCeilingDb = -18.f;
+  p.gainLDb = 6.f;
+  p.gainRDb = 0.f;
+  CHECK(proc.setParams(p, nullptr));
+  proc.requestSnapForTest();
+  proc.setStimulus(1, 1000.f, 0.04f, 0, 2);
+  constexpr int n = 4800;
+  std::vector<float> out(static_cast<size_t>(n * 2));
+  proc.process(nullptr, 1, out.data(), n);
+  double eL = 0, eR = 0;
+  for (int i = n / 2; i < n; ++i) {
+    const float l = out[static_cast<size_t>(i * 2)];
+    const float r = out[static_cast<size_t>(i * 2 + 1)];
+    CHECK(std::isfinite(l) && std::isfinite(r));
+    CHECK(std::fabs(l) <= ohdsp::dbToLin(-18.f) + 1e-3f);
+    eL += static_cast<double>(l) * l;
+    eR += static_cast<double>(r) * r;
+  }
+  CHECK(eL > eR * 1.5);
+}
+
 int run_v21_tests() {
   test_mapping_and_levels();
   test_route_sum_swap_top_and_comb();
@@ -532,5 +559,6 @@ int run_v21_tests() {
   test_measurement_ceiling_and_howling_and_nr();
   test_param_switch_is_finite();
   test_route_change_decision();
+  test_baseline_noise_follows_ear_gain();
   return g_v21;
 }

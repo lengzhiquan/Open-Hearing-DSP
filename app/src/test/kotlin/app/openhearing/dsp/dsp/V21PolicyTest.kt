@@ -138,6 +138,54 @@ class V21PolicyTest {
   }
 
   @Test
+  fun baselineComesBeforeFrequencyTestsAndMaxGainBlocksThem() {
+    var step = BaselineProgress()
+    assertEquals(MeasureStage.Baseline, step.stage)
+    assertEquals(0, step.ear)
+    assertFalse(canRunFrequencyTests(step))
+    assertFalse(locksVolumeDuring(step.stage))
+    step = applyBaseline(step, BaselineAction.Confirm, systemAtMax = false)
+    assertEquals(1, step.ear)
+    assertTrue(step.leftOk)
+    assertEquals(MeasureStage.Baseline, step.stage)
+    assertFalse(canRunFrequencyTests(step))
+    step = applyBaseline(step, BaselineAction.Confirm, systemAtMax = false)
+    assertEquals(MeasureStage.Frequencies, step.stage)
+    assertTrue(canRunFrequencyTests(step))
+    assertTrue(locksVolumeDuring(step.stage))
+
+    var loud = BaselineProgress()
+    repeat(4) { loud = applyBaseline(loud, BaselineAction.Louder, systemAtMax = false) }
+    assertEquals(BaselinePolicy.MAX_DB, loud.gainDb)
+    assertEquals(MeasureStage.Baseline, loud.stage)
+    loud = applyBaseline(loud, BaselineAction.Louder, systemAtMax = false)
+    assertEquals(MeasureStage.Blocked, loud.stage)
+    assertTrue(loud.needSystemVolume)
+    assertFalse(loud.systemAlsoMax)
+    assertFalse(canRunFrequencyTests(loud))
+    val confirmedWhileBlocked = applyBaseline(loud, BaselineAction.Confirm, systemAtMax = false)
+    assertEquals(MeasureStage.Blocked, confirmedWhileBlocked.stage)
+    val atSystemMax = applyBaseline(BaselineProgress(gainDb = BaselinePolicy.MAX_DB), BaselineAction.StillTooQuiet, systemAtMax = true)
+    assertTrue(atSystemMax.systemAlsoMax)
+    assertFalse(canRunFrequencyTests(atSystemMax))
+    val retried = applyBaseline(loud, BaselineAction.Retry, systemAtMax = false)
+    assertEquals(MeasureStage.Baseline, retried.stage)
+    assertFalse(retried.needSystemVolume)
+  }
+
+  @Test
+  fun completionOffersSaveAndAbortDoesNot() {
+    assertTrue(shouldOfferSave(frequenciesFinished = true, fitReady = true, aborted = false, baselineBlocked = false, safetyStop = false, dismissed = false))
+    assertFalse(shouldOfferSave(true, true, aborted = true, false, false, false))
+    assertFalse(shouldOfferSave(true, false, false, false, false, false))
+    assertFalse(shouldOfferSave(false, true, false, false, false, false))
+    assertFalse(shouldOfferSave(true, true, false, baselineBlocked = true, false, false))
+    assertFalse(shouldOfferSave(true, true, false, false, safetyStop = true, false))
+    assertFalse(shouldOfferSave(true, true, false, false, false, dismissed = true))
+    assertEquals("测试 2025-11-22 14:10", defaultTestPresetName(1_763_791_800_000L))
+  }
+
+  @Test
   fun volumeChangeMutesButDoesNotStop() {
     assertEquals(VolumeWatch.FirstSample, watchMediaVolume(-1, null, 8, false))
     assertEquals(VolumeWatch.Unchanged, watchMediaVolume(8, false, 8, false))

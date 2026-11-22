@@ -430,8 +430,8 @@ std::string Engine::start(int inputDeviceId, int outputDeviceId, bool preferUnpr
   return "OK\n" + log_;
 }
 
-void Engine::setStimulus(int enabled, float freqHz, float amplitude, int ear) {
-  processor_.setStimulus(enabled, freqHz, amplitude, ear);
+void Engine::setStimulus(int enabled, float freqHz, float amplitude, int ear, int kind) {
+  processor_.setStimulus(enabled, freqHz, amplitude, ear, kind);
 }
 
 void Engine::fillBands(float* inDb, float* outDb) { processor_.copyBandDb(inDb, outDb); }

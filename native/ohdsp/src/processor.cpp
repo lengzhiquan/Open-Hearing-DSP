@@ -65,7 +65,7 @@ void Processor::resetAudioState() {
   micThru_ = 1.f;
 }
 
-void Processor::setStimulus(int enabled, float freqHz, float amplitude, int ear) {
+void Processor::setStimulus(int enabled, float freqHz, float amplitude, int ear, int kind) {
   stimOn_.store(enabled ? 1 : 0, std::memory_order_release);
   int freqBits = 0;
   int ampBits = 0;
@@ -74,6 +74,7 @@ void Processor::setStimulus(int enabled, float freqHz, float amplitude, int ear)
   stimFreqBits_.store(freqBits, std::memory_order_release);
   stimAmpBits_.store(ampBits, std::memory_order_release);
   stimEar_.store(ear, std::memory_order_release);
+  stimKind_.store(kind == 2 ? 2 : 1, std::memory_order_release);
 }
 
 void Processor::copyBandDb(float* inDb, float* outDb) const {
@@ -213,6 +214,7 @@ void Processor::process(const float* in, int inChannels, float* outStereo, int f
   if (!std::isfinite(stimFreq) || stimFreq < 20.f) stimFreq = 1000.f;
   if (!std::isfinite(stimTarget) || stimTarget < 0.f) stimTarget = 0.f;
   const int stimEar = stimEar_.load(std::memory_order_acquire);
+  const int stimKind = stimKind_.load(std::memory_order_acquire);
 
   for (int i = 0; i < frames; ++i) {
     float inL = 0.f;
@@ -293,9 +295,23 @@ void Processor::process(const float* in, int inChannels, float* outStereo, int f
     const float stimGoal = stimOn ? stimTarget : 0.f;
     stimAmp_ = stimAmpCoeff_ * stimAmp_ + (1.f - stimAmpCoeff_) * stimGoal;
     if (stimAmp_ > 1e-7f) {
-      const float tone = stimAmp_ * warbleSample(stimCarrier_, stimMod_, sampleRate_, stimFreq);
-      if (stimEar != 2) l += tone;
-      if (stimEar != 1) r += tone;
+      float tone = 0.f;
+      if (stimKind == 2) {
+        pinkRng_ = pinkRng_ * 1664525u + 1013904223u;
+        const float white = static_cast<float>(pinkRng_ >> 8) * (1.f / 16777216.f) * 2.f - 1.f;
+        pinkB0_ = 0.99765f * pinkB0_ + white * 0.0990460f;
+        pinkB1_ = 0.96300f * pinkB1_ + white * 0.2965164f;
+        pinkB2_ = 0.57000f * pinkB2_ + white * 1.0526913f;
+        tone = stimAmp_ * (pinkB0_ + pinkB1_ + pinkB2_ + white * 0.1848f) * 0.11f;
+      } else {
+        tone = stimAmp_ * warbleSample(stimCarrier_, stimMod_, sampleRate_, stimFreq);
+      }
+      if (!std::isfinite(tone)) tone = 0.f;
+      // During measurement the per-ear baseline gain must change the tone, not only the mic.
+      const float addL = p.measurementMode ? tone * gL * gOut : tone;
+      const float addR = p.measurementMode ? tone * gR * gOut : tone;
+      if (stimEar != 2) l += addL;
+      if (stimEar != 1) r += addR;
     }
 
     if (p.howlingDetect || howling_.reductionDb() > 1e-3f) {

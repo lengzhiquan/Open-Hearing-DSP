@@ -30,6 +30,8 @@ object MeasurementPolicy {
 
   fun locksVolumeKeys(): Boolean = true
 
+  fun locksVolumeKeys(stage: MeasureStage): Boolean = locksVolumeDuring(stage)
+
   fun ambientUnreliable(ambientDb: Float, stimulusDb: Float, ambientMeasured: Boolean): Boolean {
     if (!ambientMeasured || !ambientDb.isFinite()) return true
     return ambientDb > AMBIENT_ABS_DB || ambientDb > stimulusDb - AMBIENT_MARGIN_DB
@@ -119,7 +121,15 @@ data class MeasurementUi(
     val falseAlarms: Int = 0,
     val catchCount: Int = 0,
     val trials: List<TrialRecord> = emptyList(),
-    val message: String = "从 1000 Hz 熟悉测试开始。测试音是啭音，电平按分析滤波器组的频段 RMS。",
+    val message: String = "先为左耳找一个听着舒服的基础音量。这一步用粉噪声，代表整体响度。",
+    val stage: MeasureStage = MeasureStage.Baseline,
+    val baseline: BaselineProgress = BaselineProgress(),
+    val aborted: Boolean = false,
+    val savePrompt: Boolean = false,
+    val saveDismissed: Boolean = false,
+    val suggestedName: String = "",
+    val fitReady: Boolean = false,
+    val volumeNote: String = "",
     val familiarizationDone: Boolean = false,
     val finished: Boolean = false,
     val pain: Boolean = false,

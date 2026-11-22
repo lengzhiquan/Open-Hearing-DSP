@@ -23,7 +23,7 @@ class Engine : public std::enable_shared_from_this<Engine> {
  public:
   std::string start(int inputDeviceId, int outputDeviceId, bool preferUnprocessed, bool trySession,
                    int requestedInputChannels);
-  void setStimulus(int enabled, float freqHz, float amplitude, int ear);
+  void setStimulus(int enabled, float freqHz, float amplitude, int ear, int kind = 1);
   void fillBands(float* inDb, float* outDb);
   void stop();
 
